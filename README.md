@@ -46,20 +46,21 @@ Follow these steps if you want nixpkgs-review-gha to push new packages to a [Cac
 
 ### Extra Nix Config (optional)
 If you have additional configuration you want to append to `/etc/nix/nix.conf`, you can [create a new variable](../../settings/variables/actions/new) with the name `EXTRA_NIX_CONFIG`.
-For example, if you want to configure nix to use additional substituters, set its value to the following:
+For this fork, a good starting point is to mirror the canix cache posture. `cache.nixos.org` is already configured by the runner's base Nix setup, so `EXTRA_NIX_CONFIG` only needs to add the extra caches and trusted keys:
 
 ```
-extra-substituters = https://nix-community.cachix.org
-extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+extra-substituters = https://attic.candee.baby/canix https://nix-community.cachix.org
+extra-trusted-public-keys = ATTIC_PUBLIC_KEY_FROM_https://attic.candee.baby/_api/v1/cache-config/canix nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
 ```
 
-### Remote Builders (optional)
-It is possible to configure nixpkgs-review-gha to use [remote builders](https://nix.dev/manual/nix/latest/advanced-topics/distributed-builds) either instead of or in addition to the local GitHub Actions runner.
-For this to work, the GitHub Actions runner needs to be able to connect to your remote builders via SSH, and you need to configure an SSH keypair for authentication.
+### Remote Builders (required for default `aarch64-linux` reviews)
+This fork keeps `aarch64-linux` enabled by default. In practice that means remote builders are required for that leg: if the workflow cannot find an `aarch64-linux` entry in `BUILDERS` plus an `SSH_KEY`, `review (aarch64-linux)` now fails fast instead of spending hours building locally on the GitHub-hosted `ubuntu-24.04-arm` runner.
+
+It is still possible to configure nixpkgs-review-gha to use [remote builders](https://nix.dev/manual/nix/latest/advanced-topics/distributed-builds) either instead of or in addition to the local GitHub Actions runner for the other systems. For this to work, the GitHub Actions runner needs to be able to connect to your remote builders via SSH, and you need to configure an SSH keypair for authentication.
 
 Set the following [secrets](../../settings/secrets/actions):
 
-- `SSH_KEY`: A private ssh key which is authorized to access your remote builders. You can generate one using `ssh-keygen -t ed25519 -f ssh_key -N '' -C ''`.
+- `SSH_KEY`: Required. A private ssh key which is authorized to access your remote builders. You can generate one using `ssh-keygen -t ed25519 -f ssh_key -N '' -C ''`.
 - `SSH_CERT`: If you have configured an [SSH certificate authority](https://manpages.debian.org/unstable/openssh-client/ssh-keygen.1.en.html#CERTIFICATES), the certificate which authorizes your `SSH_KEY` to access the remote builders. You don't need to set this variable if you have authorized your `SSH_KEY` directly (i.e. added your public key to `authorized_keys` on the remote builder).
   <details>
   <summary>Example command to generate a shortlived certificate:</summary>
@@ -78,8 +79,18 @@ Set the following [secrets](../../settings/secrets/actions):
 
 Set the following [variables](../../settings/variables/actions):
 
-- `BUILDERS`: A newline separated list of build machines in the same format as the [`builders` option in `nix.conf`](https://nix.dev/manual/nix/latest/command-ref/conf-file#conf-builders). You will need to set the value of the third field (ssh identity) to `/etc/nix/ssh_id` which is where your `SSH_KEY` is placed. Your `SSH_CERT` should be picked up automatically, if you have configured one.
-- `USE_BUILDERS`: Either `no`, `yes`, or `always`. If set to `yes`, remote builders are used *in addition to* the GitHub Actions runner. If set to `always`, *only* remote builders are used and no builds happen on the runner. If set to `no`, remote builders are not used at all.
+- `BUILDERS`: Required for default `aarch64-linux` reviews. A newline separated list of build machines in the same format as the [`builders` option in `nix.conf`](https://nix.dev/manual/nix/latest/command-ref/conf-file#conf-builders). At least one entry must advertise `aarch64-linux`. You will need to set the value of the third field (ssh identity) to `/etc/nix/ssh_id` which is where your `SSH_KEY` is placed. Your `SSH_CERT` should be picked up automatically, if you have configured one.
+- `USE_BUILDERS`: Required for default `aarch64-linux` reviews. Either `no`, `yes`, or `always`. If set to `yes`, remote builders are used *in addition to* the GitHub Actions runner. If set to `always`, *only* remote builders are used and no builds happen on the runner. If set to `no`, remote builders are not used at all. This fork should set `USE_BUILDERS=yes` by default; `aarch64-linux` reviews fail fast if it is unset or set to `no`.
+
+For a private builder fleet, `BUILDERS` might look like:
+
+```
+ssh-ng://builder@linux-amd64.example.org x86_64-linux /etc/nix/ssh_id 8 - benchmark,big-parallel,kvm,nixos-test - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAEXAMPLEamd64
+ssh-ng://builder@linux-arm64.example.org aarch64-linux /etc/nix/ssh_id 16 - benchmark,big-parallel,kvm,nixos-test - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAEXAMPLEarm64
+ssh-ng://builder@darwin.example.org x86_64-darwin,aarch64-darwin /etc/nix/ssh_id 4 - big-parallel - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAEXAMPLEdarwin
+```
+
+Replace the hostnames, capacities, supported features, and host public keys with the values for your own infrastructure.
 
 For example, you can set `BUILDERS` to the following if you want to build on the [nix-community builders](https://nix-community.org/community-builders/). Keep in mind that these builders should generally [not be trusted](https://nix-community.org/community-builders/#notes-on-security-and-safety), so be careful with what you might push into the [binary caches](#push-to-attic-cache-optional) you configured above.
 
