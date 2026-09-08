@@ -15,6 +15,11 @@ on:
         required: true
         type: boolean
         default: false
+      omniroute-smoke:
+        description: "Run the local-mock expiry smoke test for the OmniRoute fixture before publication"
+        required: true
+        type: boolean
+        default: false
       x86_64-linux:
         description: "Build on x86_64-linux"
         required: true
@@ -95,6 +100,11 @@ jobs:
       - name: nix build
         run: nix build --keep-going -L --json ${{ inputs.packages }} > build-result.json
         if: ${{ inputs.packages != '' }}
+
+      - name: packaged OmniRoute smoke test
+        if: ${{ inputs.packages != '' && inputs.omniroute-smoke }}
+        timeout-minutes: 5
+        run: node .github/actions/build-fixtures/omniroute-smoke.js
 
       - name: publish successful outputs
         if: ${{ inputs.packages != '' && inputs.push-to-cache }}
