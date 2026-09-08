@@ -216,17 +216,28 @@ async function main() {
     const bridgeKey = await json("/api/keys", "POST", {
       name: "bridge-smoke",
       modelAccessMode: "restricted",
-      allowedModels: [],
+      allowedModels: ["smoke-group", "omniroute/smoke-group"],
       allowedCombos: ["smoke-group"],
       scopes: [],
       expiresAt: null,
     });
     redactions.push(bridgeKey.key);
     const catalog = await json("/v1/models", "GET", undefined, bridgeKey.key);
-    assert(
-      catalog.data.some(entry => ["smoke-group", "omniroute/smoke-group"].includes(entry.id)),
-      "combo-only key must expose its bridge target in discovery",
+    const catalogIds = catalog.data.map(entry => entry.id);
+    assert(catalogIds.includes("smoke-group"), "combo name must appear in discovery");
+    assert(!catalogIds.includes(model), "raw provider model must stay undiscoverable");
+    const denied = await request(
+      "/v1/chat/completions",
+      "POST",
+      {
+        model,
+        messages: [{ role: "user", content: "direct" }],
+        stream: false,
+        max_tokens: 8,
+      },
+      bridgeKey.key,
     );
+    assert.equal(denied.status, 403, "raw provider model must stay denied");
     const bridgeResponse = await json(
       "/v1/chat/completions",
       "POST",
@@ -239,7 +250,7 @@ async function main() {
       bridgeKey.key,
     );
     assert.equal(bridgeResponse.choices[0].message.content, "local mock response");
-    console.log("PASS: combo-only bridge discovery and mapped inference");
+    console.log("PASS: combo-name discovery, mapped inference, raw model denied");
   } catch (error) {
     let diagnostic = fs.readFileSync(path.join(root, "runtime.log"), "utf8");
     for (const value of redactions) if (value) diagnostic = diagnostic.split(value).join("<redacted>");
