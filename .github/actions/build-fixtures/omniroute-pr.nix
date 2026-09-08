@@ -21,26 +21,12 @@ let
           original = args finalAttrs;
           sourcePackage = builtins.fromJSON (builtins.readFile "${source}/package.json");
         in
-        builtins.removeAttrs original [
-          "npmDepsHash"
-          "npmDepsFetcherVersion"
-        ]
+        original
         // {
           version = sourcePackage.version;
           src = source;
-          npmDeps = packageSet.importNpmLock {
-            npmRoot = source;
-            package = sourcePackage // {
-              overrides = packageSet.lib.mapAttrs (
-                name: value:
-                if builtins.hasAttr name (sourcePackage.dependencies // sourcePackage.devDependencies) then
-                  if builtins.isAttrs value then value // { "." = "$" + name; } else "$" + name
-                else
-                  value
-              ) sourcePackage.overrides;
-            };
-          };
-          npmConfigHook = packageSet.importNpmLock.npmConfigHook;
+          npmDepsHash = "sha256-FMXIpnQKXivZ42SH45QFn/NPg5uwh+MJD5BhnOBtjWo=";
+          npmDepsFetcherVersion = 2;
           env = original.env // {
             NEXT_DIST_DIR = ".build/next";
           };
@@ -52,5 +38,5 @@ let
       );
   };
 in
-assert package.outPath == "/nix/store/h6fa9v90gh7y5pialm28j60xyrm18qdg-omniroute-3.8.51";
+assert package.outPath == "/nix/store/l8m2ddfpmcdps8phpbdh72cc9xb4gy9l-omniroute-3.8.51";
 package
