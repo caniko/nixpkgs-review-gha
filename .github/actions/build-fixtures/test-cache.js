@@ -37,7 +37,7 @@ for (const scenario of ["success", "push failure", "missing token", "empty outpu
     };
     const stub = `
 nix() {
-  [ "$*" = "shell .#attic-client -c attic push --stdin test-cache" ] || return 99
+  [ "$*" = "shell .#attic-client -c attic push --ignore-upstream-cache-filter --stdin test-cache" ] || return 99
   read -r store_path
   [ "$store_path" = "/nix/store/test-package" ] || return 98
   python3 - <<'PY'

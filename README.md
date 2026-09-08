@@ -33,7 +33,9 @@ If you want your fork to update itself on a regular basis, you need to generate 
 The manual `build` workflow also supports `push-to-cache` (default: false).
 It publishes only successful build outputs, fails if publication fails, and
 uploads `build-result.json` and the published path list as run evidence. Cache
-credentials are available only to the publication step and its temporary config
+publication includes the complete closure, including upstream-cached references,
+so consumers using an exact `nix copy --from` can restore it from this cache alone.
+Cache credentials are available only to the publication step and its temporary config
 is removed afterward. Test that step locally with
 `node .github/actions/build-fixtures/test-cache.js` (Bash, jq and Python 3.11+).
 

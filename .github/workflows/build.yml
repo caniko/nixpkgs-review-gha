@@ -149,7 +149,7 @@ jobs:
               stream.write("endpoint = " + json.dumps(os.environ["ATTIC_SERVER"]) + "\n")
               stream.write("token = " + json.dumps(os.environ["ATTIC_TOKEN"]) + "\n")
           PY
-          nix shell .#attic-client -c attic push --stdin "$ATTIC_CACHE" < build-paths
+          nix shell .#attic-client -c attic push --ignore-upstream-cache-filter --stdin "$ATTIC_CACHE" < build-paths
           printf 'Published outputs:\n' >> "$GITHUB_STEP_SUMMARY"
           cat build-paths >> "$GITHUB_STEP_SUMMARY"
 
