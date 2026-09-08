@@ -17,6 +17,9 @@ async function main() {
   fs.chmodSync(root, 0o700);
   const password = crypto.randomBytes(32).toString("hex");
   const upstreamKey = crypto.randomBytes(32).toString("hex");
+  const jwtSecret = crypto.randomBytes(32).toString("hex");
+  const apiKeySecret = crypto.randomBytes(32).toString("hex");
+  const redactions = [password, upstreamKey, jwtSecret, apiKeySecret];
   let calls = 0;
   const mock = http.createServer(async (request, response) => {
     response.setHeader("Content-Type", "application/json");
@@ -62,8 +65,8 @@ async function main() {
       DATA_DIR: path.join(root, "state"),
       HOME: root,
       INITIAL_PASSWORD: password,
-      JWT_SECRET: crypto.randomBytes(32).toString("hex"),
-      API_KEY_SECRET: crypto.randomBytes(32).toString("hex"),
+      JWT_SECRET: jwtSecret,
+      API_KEY_SECRET: apiKeySecret,
       PORT: String(port),
       OMNIROUTE_PORT: String(port),
       API_HOST: "127.0.0.1",
@@ -139,6 +142,7 @@ async function main() {
       );
     const expiry = new Date(Date.now() + 12000).toISOString();
     const key = await json("/api/keys", "POST", { ...policy, name: "expiry-smoke", expiresAt: expiry });
+    redactions.push(key.key);
     assert.equal(key.expiresAt, expiry);
     const stored = (await json("/api/keys")).keys.find(entry => entry.id === key.id);
     assert.equal(stored.expiresAt, expiry);
@@ -167,6 +171,7 @@ async function main() {
         name: `nonexpiring-${value}`,
         ...(value === undefined ? {} : { expiresAt: value }),
       });
+      redactions.push(created.key);
       assert.equal(created.expiresAt, null);
       assert.equal((await chat(created.key)).choices[0].message.content, "local mock response");
     }
@@ -178,6 +183,12 @@ async function main() {
     }
     assert.equal((await json("/api/keys")).keys.length, count);
     console.log("PASS: malformed expiry creates no key");
+  } catch (error) {
+    let diagnostic = fs.readFileSync(path.join(root, "runtime.log"), "utf8");
+    for (const value of redactions) if (value) diagnostic = diagnostic.split(value).join("<redacted>");
+    diagnostic = diagnostic.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "<redacted-jwt>");
+    console.error(diagnostic.split("\n").slice(-25).join("\n"));
+    throw error;
   } finally {
     if (child.pid) {
       try {

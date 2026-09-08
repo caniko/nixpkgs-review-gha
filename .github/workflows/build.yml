@@ -97,6 +97,18 @@ jobs:
           ssh-key: ${{ (vars.USE_BUILDERS == 'yes' || vars.USE_BUILDERS == 'always') && secrets.SSH_KEY || '' }}
           ssh-cert: ${{ (vars.USE_BUILDERS == 'yes' || vars.USE_BUILDERS == 'always') && secrets.SSH_CERT || '' }}
 
+      - name: install test and publication tools
+        if: ${{ inputs.omniroute-smoke || inputs.push-to-cache }}
+        env:
+          RUN_SMOKE: ${{ inputs.omniroute-smoke }}
+          PUSH_CACHE: ${{ inputs.push-to-cache }}
+        run: |
+          set -euo pipefail
+          packages=(jq python3)
+          if [[ "$RUN_SMOKE" == true ]]; then packages+=(nodejs); fi
+          if [[ "$PUSH_CACHE" == true ]]; then packages+=(attic-client); fi
+          nix profile add "${packages[@]/#/.#}" --builders ''
+
       - name: nix build
         run: nix build --keep-going -L --json ${{ inputs.packages }} > build-result.json
         if: ${{ inputs.packages != '' }}
