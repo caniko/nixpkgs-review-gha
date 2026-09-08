@@ -30,6 +30,13 @@ If you want your fork to update itself on a regular basis, you need to generate 
 2. In your fork, go to "Settings" > "Secrets and variables" > "Actions" and [add a new repository secret](../../settings/secrets/actions/new) with the name `GH_SELF_UPDATE_TOKEN` and set its value to the personal access token you generated before.
 
 ### Push to Attic Cache (optional)
+The manual `build` workflow also supports `push-to-cache` (default: false).
+It publishes only successful build outputs, fails if publication fails, and
+uploads `build-result.json` and the published path list as run evidence. Cache
+credentials are available only to the publication step and its temporary config
+is removed afterward. Test that step locally with
+`node .github/actions/build-fixtures/test-cache.js` (Bash, jq and Python 3.11+).
+
 Follow these steps if you want nixpkgs-review-gha to push new packages to an [Attic](https://github.com/zhaofengli/attic) cache. Replace `$CACHE` with the name of your cache (e.g. `nixpkgs`) and `$SERVER` with the url of your Attic server (e.g. `https://attic.example.com/`):
 
 1. Generate a token with `push` and `pull` permissions: `atticadm make-token --sub nixpkgs-review-gha --validity 1y --pull $CACHE --push $CACHE`

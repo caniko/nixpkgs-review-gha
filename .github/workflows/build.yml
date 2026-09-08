@@ -10,6 +10,11 @@ on:
         description: "Packages"
         required: false
         type: string
+      push-to-cache:
+        description: "Publish successful outputs to the configured dedicated Attic cache"
+        required: true
+        type: boolean
+        default: false
       x86_64-linux:
         description: "Build on x86_64-linux"
         required: true
@@ -88,8 +93,46 @@ jobs:
           ssh-cert: ${{ (vars.USE_BUILDERS == 'yes' || vars.USE_BUILDERS == 'always') && secrets.SSH_CERT || '' }}
 
       - name: nix build
-        run: nix build --keep-going -L ${{ inputs.packages }}
+        run: nix build --keep-going -L --json ${{ inputs.packages }} > build-result.json
         if: ${{ inputs.packages != '' }}
+
+      - name: publish successful outputs
+        if: ${{ inputs.packages != '' && inputs.push-to-cache }}
+        env:
+          ATTIC_SERVER: ${{ vars.ATTIC_SERVER }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${ATTIC_SERVER:?missing Attic endpoint}" "${ATTIC_CACHE:?missing Attic cache}" "${ATTIC_TOKEN:?missing Attic token}"
+          jq -er '[.[].outputs[]] | unique | select(length > 0) | .[]' build-result.json > build-paths
+          config=$(mktemp -d)
+          trap 'rm -rf "$config"' EXIT
+          export XDG_CONFIG_HOME="$config"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          directory = Path(os.environ["XDG_CONFIG_HOME"]) / "attic"
+          directory.mkdir(mode=0o700)
+          path = directory / "config.toml"
+          with open(path, "x", opener=lambda p, flags: os.open(p, flags, 0o600)) as stream:
+              stream.write('default-server = "worker"\n[servers.worker]\n')
+              stream.write("endpoint = " + json.dumps(os.environ["ATTIC_SERVER"]) + "\n")
+              stream.write("token = " + json.dumps(os.environ["ATTIC_TOKEN"]) + "\n")
+          PY
+          nix shell .#attic-client -c attic push --stdin "$ATTIC_CACHE" < build-paths
+          printf 'Published outputs:\n' >> "$GITHUB_STEP_SUMMARY"
+          cat build-paths >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload build evidence
+        if: ${{ always() && inputs.packages != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-result-${{ matrix.system }}
+          path: |
+            build-result.json
+            build-paths
+          if-no-files-found: warn
 
       - name: set GITHUB_TOKEN
         if: ${{ inputs.upterm }}
