@@ -167,7 +167,18 @@ async function main() {
     );
     assert([401, 403].includes(expired.status), `expired key accepted: HTTP ${expired.status}`);
     assert.equal(calls, beforeCalls + 1, "expired key reached upstream");
-    assert.equal((await request("/api/v1/me/status", "GET", undefined, key.key)).status, 401);
+    // validateApiKey caches successful authentication for 60 seconds upstream.
+    // Chat policy above must reject immediately; the status route must reject
+    // once that existing, non-sliding cache expires. Do not conflate the two.
+    const statusDeadline = Date.now() + 65000;
+    let statusAfterExpiry;
+    do {
+      statusAfterExpiry = (await request("/api/v1/me/status", "GET", undefined, key.key)).status;
+      if (statusAfterExpiry === 401) break;
+      assert.equal(statusAfterExpiry, 403, "unexpected status during auth-cache lifetime");
+      await delay(500);
+    } while (Date.now() < statusDeadline);
+    assert.equal(statusAfterExpiry, 401, "status authentication outlived the upstream cache TTL");
     assert.equal(child.exitCode, null, "expiry must work without restarting the gateway");
     console.log("PASS: packaged creation, persistence/readback, inference before expiry, rejection after expiry");
 
