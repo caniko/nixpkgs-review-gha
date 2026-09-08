@@ -101,6 +101,13 @@ jobs:
         run: nix build --keep-going -L --json ${{ inputs.packages }} > build-result.json
         if: ${{ inputs.packages != '' }}
 
+      - name: failed build resource diagnostics
+        if: ${{ failure() && runner.os == 'Linux' }}
+        run: |
+          free -h
+          df -h /nix
+          sudo dmesg --ctime | tail -n 120
+
       - name: packaged OmniRoute smoke test
         if: ${{ inputs.packages != '' && inputs.omniroute-smoke }}
         timeout-minutes: 5
