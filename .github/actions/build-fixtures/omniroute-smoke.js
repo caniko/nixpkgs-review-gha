@@ -200,6 +200,46 @@ async function main() {
     }
     assert.equal((await json("/api/keys")).keys.length, count);
     console.log("PASS: malformed expiry creates no key");
+
+    const combo = await json("/api/combos", "POST", {
+      name: "smoke-group",
+      strategy: "priority",
+      models: [model],
+    });
+    assert.equal(typeof combo.id, "string");
+    await json("/api/model-combo-mappings", "POST", {
+      pattern: "omniroute/smoke-group",
+      comboId: combo.id,
+      priority: 100,
+      enabled: true,
+    });
+    const bridgeKey = await json("/api/keys", "POST", {
+      name: "bridge-smoke",
+      modelAccessMode: "restricted",
+      allowedModels: [],
+      allowedCombos: ["smoke-group"],
+      scopes: [],
+      expiresAt: null,
+    });
+    redactions.push(bridgeKey.key);
+    const catalog = await json("/v1/models", "GET", undefined, bridgeKey.key);
+    assert(
+      catalog.data.some(entry => ["smoke-group", "omniroute/smoke-group"].includes(entry.id)),
+      "combo-only key must expose its bridge target in discovery",
+    );
+    const bridgeResponse = await json(
+      "/v1/chat/completions",
+      "POST",
+      {
+        model: "omniroute/smoke-group",
+        messages: [{ role: "user", content: "bridge test" }],
+        stream: false,
+        max_tokens: 8,
+      },
+      bridgeKey.key,
+    );
+    assert.equal(bridgeResponse.choices[0].message.content, "local mock response");
+    console.log("PASS: combo-only bridge discovery and mapped inference");
   } catch (error) {
     let diagnostic = fs.readFileSync(path.join(root, "runtime.log"), "utf8");
     for (const value of redactions) if (value) diagnostic = diagnostic.split(value).join("<redacted>");
