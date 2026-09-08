@@ -29,6 +29,7 @@ let
           npmDepsFetcherVersion = 2;
           env = original.env // {
             NEXT_DIST_DIR = ".build/next";
+            OMNIROUTE_USE_TURBOPACK = "0";
           };
           postPatch = original.postPatch + ''
             # build:cli must compile this source, not reuse a standalone tree.
@@ -38,5 +39,5 @@ let
       );
   };
 in
-assert package.outPath == "/nix/store/l8m2ddfpmcdps8phpbdh72cc9xb4gy9l-omniroute-3.8.51";
+assert package.outPath == "/nix/store/d2q41yxx5gxf3ch6xjnwp7z6bq7c9dv4-omniroute-3.8.51";
 package

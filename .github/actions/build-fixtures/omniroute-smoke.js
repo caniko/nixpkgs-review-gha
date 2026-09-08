@@ -62,6 +62,7 @@ async function main() {
       DATA_DIR: path.join(root, "state"),
       HOME: root,
       INITIAL_PASSWORD: password,
+      JWT_SECRET: crypto.randomBytes(32).toString("hex"),
       API_KEY_SECRET: crypto.randomBytes(32).toString("hex"),
       PORT: String(port),
       OMNIROUTE_PORT: String(port),
