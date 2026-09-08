@@ -146,6 +146,11 @@ async function main() {
     assert.equal(key.expiresAt, expiry);
     const stored = (await json("/api/keys")).keys.find(entry => entry.id === key.id);
     assert.equal(stored.expiresAt, expiry);
+    await json(`/api/keys/${key.id}`, "PATCH", { scopes: [] });
+    const authenticatedWithoutScope = await request("/api/v1/me/status", "GET", undefined, key.key);
+    assert.equal(authenticatedWithoutScope.status, 403);
+    assert.deepEqual(await authenticatedWithoutScope.json(), { error: "Forbidden" });
+    assert.equal((await request("/api/v1/me/status", "GET", undefined, "invalid-probe")).status, 401);
     const beforeCalls = calls;
     assert.equal((await chat(key.key)).choices[0].message.content, "local mock response");
     assert.equal(calls, beforeCalls + 1, "request must reach only the local mock");
@@ -162,6 +167,7 @@ async function main() {
     );
     assert([401, 403].includes(expired.status), `expired key accepted: HTTP ${expired.status}`);
     assert.equal(calls, beforeCalls + 1, "expired key reached upstream");
+    assert.equal((await request("/api/v1/me/status", "GET", undefined, key.key)).status, 401);
     assert.equal(child.exitCode, null, "expiry must work without restarting the gateway");
     console.log("PASS: packaged creation, persistence/readback, inference before expiry, rejection after expiry");
 
