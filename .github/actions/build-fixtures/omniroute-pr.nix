@@ -34,7 +34,7 @@ let
               overrides = packageSet.lib.mapAttrs (
                 name: value:
                 if builtins.hasAttr name (sourcePackage.dependencies // sourcePackage.devDependencies) then
-                  if builtins.isAttrs value then value // { "." = "$${name}"; } else "$${name}"
+                  if builtins.isAttrs value then value // { "." = "$" + name; } else "$" + name
                 else
                   value
               ) sourcePackage.overrides;
@@ -52,5 +52,5 @@ let
       );
   };
 in
-assert package.outPath == "/nix/store/61xi72j9271dda929psyaigpxgkpk6cx-omniroute-3.8.51";
+assert package.outPath == "/nix/store/h6fa9v90gh7y5pialm28j60xyrm18qdg-omniroute-3.8.51";
 package
