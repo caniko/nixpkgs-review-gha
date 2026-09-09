@@ -10,6 +10,20 @@ const { spawn } = require("node:child_process");
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const listen = server => new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+function parseSocksConnect(buf) {
+  if (buf.length < 5 || buf[0] !== 5 || buf[1] !== 1) return null;
+  if (buf[3] === 3) {
+    const n = buf[4];
+    const need = 7 + n;
+    if (buf.length < need) return null;
+    return { host: buf.subarray(5, 5 + n).toString(), port: buf.readUInt16BE(5 + n), need };
+  }
+  if (buf[3] === 1) {
+    if (buf.length < 10) return null;
+    return { host: `${buf[4]}.${buf[5]}.${buf[6]}.${buf[7]}`, port: buf.readUInt16BE(8), need: 10 };
+  }
+  return null;
+}
 async function main() {
   const outputs = JSON.parse(fs.readFileSync("build-result.json", "utf8"));
   assert.equal(outputs.length, 1);
@@ -72,22 +86,49 @@ async function main() {
   });
   await listen(mock);
   const mockPort = mock.address().port;
-  let socksHits = 0;
+  const tunnels = new Set();
+  let socksConnects = 0;
   const socks = net.createServer(socket => {
-    socket.once("data", () => {
-      socket.write(Buffer.from([5, 0]));
-      socket.once("data", () => {
-        socksHits++;
-        const dest = net.connect(mockPort, "127.0.0.1", () => {
-          socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, mockPort >> 8, mockPort & 0xff]));
-          socket.pipe(dest);
-          dest.pipe(socket);
-        });
-        dest.on("error", () => socket.destroy());
+    let buf = Buffer.alloc(0);
+    let stage = "greet";
+    socket.on("data", chunk => {
+      if (stage === "pipe") return;
+      buf = Buffer.concat([buf, chunk]);
+      if (stage === "greet") {
+        if (buf.length < 2 || buf[0] !== 5) return socket.destroy();
+        const n = buf[1];
+        if (buf.length < 2 + n) return;
+        buf = buf.subarray(2 + n);
+        socket.write(Buffer.from([5, 0]));
+        stage = "req";
+      }
+      if (stage !== "req") return;
+      const parsed = parseSocksConnect(buf);
+      if (!parsed) return;
+      if (parsed.host !== "nvidia.invalid" || parsed.port !== mockPort) return socket.destroy();
+      buf = buf.subarray(parsed.need);
+      socksConnects++;
+      const dest = net.connect(mockPort, "127.0.0.1");
+      tunnels.add(socket);
+      tunnels.add(dest);
+      dest.on("connect", () => {
+        socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, mockPort >> 8, mockPort & 0xff]));
+        socket.removeAllListeners("data");
+        if (buf.length) dest.write(buf);
+        socket.pipe(dest);
+        dest.pipe(socket);
+        stage = "pipe";
       });
+      dest.on("error", () => socket.destroy());
+      socket.on("close", () => dest.destroy());
     });
     socket.on("error", () => {});
   });
+  const destroySocks = () => {
+    for (const tunnel of tunnels) tunnel.destroy();
+    tunnels.clear();
+    return new Promise(resolve => socks.close(resolve));
+  };
   await new Promise(resolve => socks.listen(0, "127.0.0.1", resolve));
   const socksPort = socks.address().port;
   const reservation = http.createServer();
@@ -184,22 +225,24 @@ async function main() {
     const nvidiaId = nvidia.connection?.id || nvidia.id;
     assert.equal(typeof nvidiaId, "string");
     const nvidiaDeadline = Date.now() + 15000;
-    while (nvidiaCalls < 1 && Date.now() < nvidiaDeadline) await delay(100);
+    while ((nvidiaCalls < 1 || socksConnects < 1) && Date.now() < nvidiaDeadline) await delay(100);
+    assert(socksConnects >= 1, "NVIDIA must CONNECT nvidia.invalid through SOCKS");
+    assert(nvidiaCalls >= 1, "NVIDIA probe must reach the mock through SOCKS");
     const nvidiaBefore = nvidiaCalls;
-    const socksBefore = socksHits;
     const nvidiaProbe = await json(`/api/providers/${nvidiaId}/test`, "POST", {});
     assert.equal(nvidiaProbe.valid, true, "NVIDIA probe must succeed through SOCKS");
     assert.notEqual(nvidiaProbe.skipped, true);
     assert.ok(!nvidiaProbe.warning);
     assert.equal(nvidiaCalls, nvidiaBefore + 1, "explicit NVIDIA probe must hit the mock once");
-    assert(socksHits > socksBefore, "NVIDIA probe must use the SOCKS proxy");
     const nvidiaRow = (await json("/api/providers")).connections.find(entry => entry.id === nvidiaId);
     assert.equal(nvidiaRow?.isActive, true);
-    await new Promise(resolve => socks.close(resolve));
+    await destroySocks();
+    const downCalls = nvidiaCalls;
     const nvidiaDown = await request(`/api/providers/${nvidiaId}/test`, "POST", {});
     assert.equal(nvidiaDown.status, 200);
     const nvidiaDownBody = await nvidiaDown.json();
     assert.equal(nvidiaDownBody.valid, false, "NVIDIA probe must fail when SOCKS is down");
+    assert.equal(nvidiaCalls, downCalls, "downed SOCKS must not reach the mock");
     console.log("PASS: NVIDIA proxy isolation");
     const model = "smoke/test";
     const policy = { modelAccessMode: "restricted", allowedModels: [model], allowedCombos: [], scopes: [] };
@@ -342,7 +385,7 @@ async function main() {
         process.kill(-child.pid, "SIGKILL");
       } catch {}
     }
-    socks.close();
+    await destroySocks().catch(() => {});
     mock.closeAllConnections();
     await new Promise(resolve => mock.close(resolve));
     fs.closeSync(log);
