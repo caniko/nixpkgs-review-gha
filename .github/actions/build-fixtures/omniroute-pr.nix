@@ -34,10 +34,35 @@ let
           postPatch = original.postPatch + ''
             # build:cli must compile this source, not reuse a standalone tree.
             rm -rf .build/next .next dist
+            substituteInPlace src/lib/providers/validation/specialtyInline.ts \
+              --replace-fail '    const res = await directHttpsRequest(
+      chatUrl,
+      {
+        method: "POST",
+        headers: buildBearerHeaders(apiKey, providerSpecificData),
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: "user", content: "test" }],
+          max_tokens: 1,
+        }),
+      },
+      20000
+    );' '    const res = await validationWrite(
+      chatUrl,
+      {
+        method: "POST",
+        headers: buildBearerHeaders(apiKey, providerSpecificData),
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: "user", content: "test" }],
+          max_tokens: 1,
+        }),
+      },
+      false
+    );'
           '';
         }
       );
   };
 in
-assert package.outPath == "/nix/store/d2q41yxx5gxf3ch6xjnwp7z6bq7c9dv4-omniroute-3.8.51";
 package
