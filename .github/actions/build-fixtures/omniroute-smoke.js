@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
+const net = require("node:net");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 
@@ -20,7 +21,8 @@ async function main() {
   const jwtSecret = crypto.randomBytes(32).toString("hex");
   const apiKeySecret = crypto.randomBytes(32).toString("hex");
   const redactions = [password, upstreamKey, jwtSecret, apiKeySecret];
-  let calls = 0;
+  let inferenceCalls = 0;
+  let nvidiaCalls = 0;
   const mock = http.createServer(async (request, response) => {
     response.setHeader("Content-Type", "application/json");
     if (request.url === "/v1/models") {
@@ -39,7 +41,7 @@ async function main() {
       return;
     }
     if (payload.messages?.[0]?.content === "test" && payload.max_tokens === 1) {
-      calls++;
+      nvidiaCalls++;
       response.end(
         JSON.stringify({
           id: "nvidia-probe",
@@ -56,7 +58,7 @@ async function main() {
       response.writeHead(400).end("{}");
       return;
     }
-    calls++;
+    inferenceCalls++;
     response.end(
       JSON.stringify({
         id: "mock",
@@ -69,6 +71,25 @@ async function main() {
     );
   });
   await listen(mock);
+  const mockPort = mock.address().port;
+  let socksHits = 0;
+  const socks = net.createServer(socket => {
+    socket.once("data", () => {
+      socket.write(Buffer.from([5, 0]));
+      socket.once("data", () => {
+        socksHits++;
+        const dest = net.connect(mockPort, "127.0.0.1", () => {
+          socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, mockPort >> 8, mockPort & 0xff]));
+          socket.pipe(dest);
+          dest.pipe(socket);
+        });
+        dest.on("error", () => socket.destroy());
+      });
+    });
+    socket.on("error", () => {});
+  });
+  await new Promise(resolve => socks.listen(0, "127.0.0.1", resolve));
+  const socksPort = socks.address().port;
   const reservation = http.createServer();
   await listen(reservation);
   const port = reservation.address().port;
@@ -144,16 +165,42 @@ async function main() {
     assert.equal(typeof node.id, "string");
     await json("/api/providers", "POST", { provider: node.id, name: "Local smoke", apiKey: upstreamKey });
     await json("/api/provider-models", "POST", { provider: node.id, modelId: "test", apiFormat: "chat-completions" });
+    await json("/api/settings/proxies", "POST", {
+      name: "smoke-socks",
+      type: "socks5",
+      host: "127.0.0.1",
+      port: socksPort,
+      status: "active",
+      source: "manual",
+      family: "auto",
+      assignment: { scope: "global" },
+    });
     const nvidia = await json("/api/providers", "POST", {
       provider: "nvidia",
       name: "NVIDIA probe",
       apiKey: upstreamKey,
-      providerSpecificData: { baseUrl: `http://127.0.0.1:${mock.address().port}/v1/chat/completions` },
+      providerSpecificData: { baseUrl: `http://nvidia.invalid:${mockPort}/v1/chat/completions` },
     });
     const nvidiaId = nvidia.connection?.id || nvidia.id;
     assert.equal(typeof nvidiaId, "string");
+    const nvidiaDeadline = Date.now() + 15000;
+    while (nvidiaCalls < 1 && Date.now() < nvidiaDeadline) await delay(100);
+    const nvidiaBefore = nvidiaCalls;
+    const socksBefore = socksHits;
     const nvidiaProbe = await json(`/api/providers/${nvidiaId}/test`, "POST", {});
-    assert.equal(nvidiaProbe.valid, true, "NVIDIA probe must succeed through validationWrite");
+    assert.equal(nvidiaProbe.valid, true, "NVIDIA probe must succeed through SOCKS");
+    assert.notEqual(nvidiaProbe.skipped, true);
+    assert.ok(!nvidiaProbe.warning);
+    assert.equal(nvidiaCalls, nvidiaBefore + 1, "explicit NVIDIA probe must hit the mock once");
+    assert(socksHits > socksBefore, "NVIDIA probe must use the SOCKS proxy");
+    const nvidiaRow = (await json("/api/providers")).connections.find(entry => entry.id === nvidiaId);
+    assert.equal(nvidiaRow?.isActive, true);
+    await new Promise(resolve => socks.close(resolve));
+    const nvidiaDown = await request(`/api/providers/${nvidiaId}/test`, "POST", {});
+    assert.equal(nvidiaDown.status, 200);
+    const nvidiaDownBody = await nvidiaDown.json();
+    assert.equal(nvidiaDownBody.valid, false, "NVIDIA probe must fail when SOCKS is down");
+    console.log("PASS: NVIDIA proxy isolation");
     const model = "smoke/test";
     const policy = { modelAccessMode: "restricted", allowedModels: [model], allowedCombos: [], scopes: [] };
     const chat = key =>
@@ -179,9 +226,9 @@ async function main() {
     assert.equal(authenticatedWithoutScope.status, 403);
     assert.deepEqual(await authenticatedWithoutScope.json(), { error: "Forbidden" });
     assert.equal((await request("/api/v1/me/status", "GET", undefined, "invalid-probe")).status, 401);
-    const beforeCalls = calls;
+    const beforeCalls = inferenceCalls;
     assert.equal((await chat(key.key)).choices[0].message.content, "local mock response");
-    assert.equal(calls, beforeCalls + 1, "request must reach only the local mock");
+    assert.equal(inferenceCalls, beforeCalls + 1, "request must reach only the local mock");
     await delay(Math.max(0, Date.parse(expiry) - Date.now() + 300));
     const expired = await request(
       "/v1/chat/completions",
@@ -194,7 +241,7 @@ async function main() {
       key.key,
     );
     assert([401, 403].includes(expired.status), `expired key accepted: HTTP ${expired.status}`);
-    assert.equal(calls, beforeCalls + 1, "expired key reached upstream");
+    assert.equal(inferenceCalls, beforeCalls + 1, "expired key reached upstream");
     // validateApiKey caches successful authentication for 60 seconds upstream.
     // Chat policy above must reject immediately; the status route must reject
     // once that existing, non-sliding cache expires. Do not conflate the two.
@@ -295,6 +342,7 @@ async function main() {
         process.kill(-child.pid, "SIGKILL");
       } catch {}
     }
+    socks.close();
     mock.closeAllConnections();
     await new Promise(resolve => mock.close(resolve));
     fs.closeSync(log);
