@@ -11,8 +11,10 @@ const { spawn } = require("node:child_process");
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const listen = server => new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 function parseSocksConnect(buf) {
-  if (buf.length < 5 || buf[0] !== 5 || buf[1] !== 1) return null;
+  if (buf.length < 4) return null;
+  if (buf[0] !== 5 || buf[1] !== 1 || buf[2] !== 0) return { error: true };
   if (buf[3] === 3) {
+    if (buf.length < 5) return null;
     const n = buf[4];
     const need = 7 + n;
     if (buf.length < need) return null;
@@ -22,7 +24,7 @@ function parseSocksConnect(buf) {
     if (buf.length < 10) return null;
     return { host: `${buf[4]}.${buf[5]}.${buf[6]}.${buf[7]}`, port: buf.readUInt16BE(8), need: 10 };
   }
-  return null;
+  return { error: true };
 }
 async function main() {
   const outputs = JSON.parse(fs.readFileSync("build-result.json", "utf8"));
@@ -89,15 +91,19 @@ async function main() {
   const tunnels = new Set();
   let socksConnects = 0;
   const socks = net.createServer(socket => {
+    tunnels.add(socket);
+    socket.setTimeout(5000, () => socket.destroy());
     let buf = Buffer.alloc(0);
     let stage = "greet";
     socket.on("data", chunk => {
       if (stage === "pipe") return;
       buf = Buffer.concat([buf, chunk]);
       if (stage === "greet") {
-        if (buf.length < 2 || buf[0] !== 5) return socket.destroy();
+        if (buf.length < 2) return;
+        if (buf[0] !== 5) return socket.destroy();
         const n = buf[1];
         if (buf.length < 2 + n) return;
+        if (!buf.subarray(2, 2 + n).includes(0)) return socket.destroy();
         buf = buf.subarray(2 + n);
         socket.write(Buffer.from([5, 0]));
         stage = "req";
@@ -105,13 +111,13 @@ async function main() {
       if (stage !== "req") return;
       const parsed = parseSocksConnect(buf);
       if (!parsed) return;
-      if (parsed.host !== "nvidia.invalid" || parsed.port !== mockPort) return socket.destroy();
+      if (parsed.error || parsed.host !== "nvidia.invalid" || parsed.port !== mockPort) return socket.destroy();
       buf = buf.subarray(parsed.need);
       socksConnects++;
       const dest = net.connect(mockPort, "127.0.0.1");
-      tunnels.add(socket);
       tunnels.add(dest);
       dest.on("connect", () => {
+        socket.setTimeout(0);
         socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, mockPort >> 8, mockPort & 0xff]));
         socket.removeAllListeners("data");
         if (buf.length) dest.write(buf);
