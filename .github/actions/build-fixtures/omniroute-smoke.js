@@ -34,7 +34,25 @@ async function main() {
     let body = "";
     for await (const part of request) body += part;
     const payload = JSON.parse(body);
-    if (payload.model !== "test" || payload.stream === true) {
+    if (payload.stream === true) {
+      response.writeHead(400).end("{}");
+      return;
+    }
+    if (payload.messages?.[0]?.content === "test" && payload.max_tokens === 1) {
+      calls++;
+      response.end(
+        JSON.stringify({
+          id: "nvidia-probe",
+          object: "chat.completion",
+          created: 1,
+          model: payload.model,
+          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+      );
+      return;
+    }
+    if (payload.model !== "test") {
       response.writeHead(400).end("{}");
       return;
     }
@@ -126,6 +144,16 @@ async function main() {
     assert.equal(typeof node.id, "string");
     await json("/api/providers", "POST", { provider: node.id, name: "Local smoke", apiKey: upstreamKey });
     await json("/api/provider-models", "POST", { provider: node.id, modelId: "test", apiFormat: "chat-completions" });
+    const nvidia = await json("/api/providers", "POST", {
+      provider: "nvidia",
+      name: "NVIDIA probe",
+      apiKey: upstreamKey,
+      providerSpecificData: { baseUrl: `http://127.0.0.1:${mock.address().port}/v1/chat/completions` },
+    });
+    const nvidiaId = nvidia.connection?.id || nvidia.id;
+    assert.equal(typeof nvidiaId, "string");
+    const nvidiaProbe = await json(`/api/providers/${nvidiaId}/test`, "POST", {});
+    assert.equal(nvidiaProbe.valid, true, "NVIDIA probe must succeed through validationWrite");
     const model = "smoke/test";
     const policy = { modelAccessMode: "restricted", allowedModels: [model], allowedCombos: [], scopes: [] };
     const chat = key =>

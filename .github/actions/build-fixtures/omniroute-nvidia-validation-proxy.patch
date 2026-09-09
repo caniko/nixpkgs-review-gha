@@ -1,0 +1,23 @@
+--- a/src/lib/providers/validation/specialtyInline.ts
++++ b/src/lib/providers/validation/specialtyInline.ts
+@@ -256,18 +256,16 @@
+     const modelId = resolveNvidiaValidationModel(providerSpecificData);
+-    // #3226: use raw https (bypass the proxy/TLS-patched fetch) — the undici
+-    // dispatcher stalls against NVIDIA's endpoint, causing a 504 timeout.
+-    const res = await directHttpsRequest(
++    const res = await validationWrite(
+       chatUrl,
+       {
+         method: "POST",
+         headers: buildBearerHeaders(apiKey, providerSpecificData),
+         body: JSON.stringify({
+           model: modelId,
+           messages: [{ role: "user", content: "test" }],
+           max_tokens: 1,
+         }),
+       },
+-      20000
++      false
+     );
+     if (res.status === 401 || res.status === 403) {
+       return { valid: false, error: "Invalid API key" };
