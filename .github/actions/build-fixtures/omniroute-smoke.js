@@ -46,6 +46,7 @@ async function main() {
   let tlsTrustedHits = 0;
   let tlsTrustedViaSocks = 0;
   let tlsTrusted = null;
+  let childB = null;
   let inferenceCalls = 0;
   let nvidiaCalls = 0;
   let nvidiaViaSocks = 0;
@@ -53,6 +54,23 @@ async function main() {
   const downKey = crypto.randomBytes(32).toString("hex");
   redactions.push(downKey);
   const proxiedPorts = new Set();
+  execSync(
+    `openssl req -x509 -newkey rsa:2048 -nodes -keyout "${path.join(root, "ca-key.pem")}" -out "${path.join(root, "ca-cert.pem")}" -days 1 -subj "/CN=smoke-ca"`,
+    { stdio: "ignore" },
+  );
+  execSync(
+    `openssl req -x509 -newkey rsa:2048 -nodes -keyout "${path.join(root, "untrusted-key.pem")}" -out "${path.join(root, "untrusted-cert.pem")}" -days 1 -subj "/CN=nvidia-tls.invalid" -addext "subjectAltName=DNS:nvidia-tls.invalid"`,
+    { stdio: "ignore" },
+  );
+  execSync(
+    `openssl req -newkey rsa:2048 -nodes -keyout "${path.join(root, "trusted-key.pem")}" -out "${path.join(root, "trusted.csr")}" -subj "/CN=nvidia-https.invalid"`,
+    { stdio: "ignore" },
+  );
+  fs.writeFileSync(path.join(root, "trusted.ext"), "subjectAltName=DNS:nvidia-https.invalid\n");
+  execSync(
+    `openssl x509 -req -in "${path.join(root, "trusted.csr")}" -CA "${path.join(root, "ca-cert.pem")}" -CAkey "${path.join(root, "ca-key.pem")}" -CAcreateserial -out "${path.join(root, "trusted-cert.pem")}" -days 1 -extfile "${path.join(root, "trusted.ext")}"`,
+    { stdio: "ignore" },
+  );
   const mock = http.createServer(async (request, response) => {
     response.setHeader("Content-Type", "application/json");
     if (request.url === "/v1/models") {
@@ -171,23 +189,6 @@ async function main() {
   const port = reservation.address().port;
   await new Promise(resolve => reservation.close(resolve));
   const base = `http://127.0.0.1:${port}`;
-  execSync(
-    `openssl req -x509 -newkey rsa:2048 -nodes -keyout "${path.join(root, "ca-key.pem")}" -out "${path.join(root, "ca-cert.pem")}" -days 1 -subj "/CN=smoke-ca"`,
-    { stdio: "ignore" },
-  );
-  execSync(
-    `openssl req -x509 -newkey rsa:2048 -nodes -keyout "${path.join(root, "untrusted-key.pem")}" -out "${path.join(root, "untrusted-cert.pem")}" -days 1 -subj "/CN=nvidia-tls.invalid" -addext "subjectAltName=DNS:nvidia-tls.invalid"`,
-    { stdio: "ignore" },
-  );
-  execSync(
-    `openssl req -newkey rsa:2048 -nodes -keyout "${path.join(root, "trusted-key.pem")}" -out "${path.join(root, "trusted.csr")}" -subj "/CN=nvidia-https.invalid"`,
-    { stdio: "ignore" },
-  );
-  fs.writeFileSync(path.join(root, "trusted.ext"), "subjectAltName=DNS:nvidia-https.invalid\n");
-  execSync(
-    `openssl x509 -req -in "${path.join(root, "trusted.csr")}" -CA "${path.join(root, "ca-cert.pem")}" -CAkey "${path.join(root, "ca-key.pem")}" -CAcreateserial -out "${path.join(root, "trusted-cert.pem")}" -days 1 -extfile "${path.join(root, "trusted.ext")}"`,
-    { stdio: "ignore" },
-  );
   const log = fs.openSync(path.join(root, "runtime.log"), "wx", 0o600);
   const child = spawn(executable, ["--no-open"], {
     detached: true,
@@ -516,13 +517,238 @@ async function main() {
     );
     assert.equal(bridgeResponse.choices[0].message.content, "local mock response");
     console.log("PASS: combo-name discovery, mapped inference, raw model denied");
+    const reservationB = http.createServer();
+    await listen(reservationB);
+    const portB = reservationB.address().port;
+    await new Promise(resolve => reservationB.close(resolve));
+    const baseB = `http://127.0.0.1:${portB}`;
+    const logB = fs.openSync(path.join(root, "runtime-b.log"), "wx", 0o600);
+    childB = spawn(executable, ["--no-open"], {
+      detached: true,
+      stdio: ["ignore", logB, logB],
+      env: {
+        ...process.env,
+        DATA_DIR: path.join(root, "state-b"),
+        HOME: root,
+        INITIAL_PASSWORD: password,
+        JWT_SECRET: jwtSecret,
+        API_KEY_SECRET: apiKeySecret,
+        PORT: String(portB),
+        OMNIROUTE_PORT: String(portB),
+        API_HOST: "127.0.0.1",
+        HOST: "127.0.0.1",
+        HOSTNAME: "127.0.0.1",
+        OMNIROUTE_SERVER_HOST: "127.0.0.1",
+        REQUIRE_API_KEY: "true",
+        PROXY_FAIL_OPEN: "false",
+        OMNIROUTE_ENABLE_LIVE_WS: "0",
+      },
+    });
+    childB.on("error", () => {});
+    let cookieB;
+    async function requestB(route, method = "GET", body, key) {
+      return fetch(baseB + route, {
+        method,
+        signal: AbortSignal.timeout(15000),
+        headers: {
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(key ? { Authorization: `Bearer ${key}` } : cookieB ? { Cookie: cookieB } : {}),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    }
+    async function jsonB(route, method, body, key) {
+      const response = await requestB(route, method, body, key);
+      assert(response.ok, `B ${method || "GET"} ${route}: HTTP ${response.status}`);
+      return response.json();
+    }
+    let readyB = false;
+    for (let attempt = 0; attempt < 90; attempt++) {
+      assert.equal(childB.exitCode, null, "gateway B exited during startup");
+      try {
+        const response = await fetch(baseB + "/api/health", { signal: AbortSignal.timeout(1000) });
+        if (response.ok) {
+          readyB = true;
+          break;
+        }
+      } catch {}
+      await delay(1000);
+    }
+    assert(readyB, "gateway B did not become ready within 90 seconds");
+    const loginB = await requestB("/api/auth/login", "POST", { password });
+    assert(loginB.ok, `B login: HTTP ${loginB.status}`);
+    cookieB = loginB.headers
+      .getSetCookie()
+      .map(value => value.split(";")[0])
+      .join("; ");
+    assert(cookieB);
+    const { node: nodeB } = await jsonB("/api/provider-nodes", "POST", {
+      name: "B smoke",
+      prefix: "bsmoke",
+      type: "openai-compatible",
+      apiType: "chat",
+      baseUrl: `http://127.0.0.1:${mock.address().port}/v1`,
+    });
+    await jsonB("/api/providers", "POST", { provider: nodeB.id, name: "B smoke", apiKey: upstreamKey });
+    await jsonB("/api/provider-models", "POST", { provider: nodeB.id, modelId: "test", apiFormat: "chat-completions" });
+    const comboB = await jsonB("/api/combos", "POST", { name: "b-group", strategy: "priority", models: ["bsmoke/test"] });
+    await jsonB("/api/model-combo-mappings", "POST", {
+      pattern: "omniroute/b-group",
+      comboId: comboB.id,
+      priority: 100,
+      enabled: true,
+    });
+    const bridgeKeyB = await jsonB("/api/keys", "POST", {
+      name: "bridge-b",
+      modelAccessMode: "restricted",
+      allowedModels: ["b-group", "omniroute/b-group"],
+      allowedCombos: ["b-group"],
+      scopes: [],
+      expiresAt: null,
+    });
+    redactions.push(bridgeKeyB.key);
+    const catalogB = await jsonB("/v1/models", "GET", undefined, bridgeKeyB.key);
+    assert(catalogB.data.some(entry => entry.id === "b-group"), "B must discover b-group for the bridge key");
+    const { node: bridgeNode } = await json("/api/provider-nodes", "POST", {
+      name: "dejana-bridge",
+      prefix: "dejana",
+      type: "openai-compatible",
+      apiType: "chat",
+      baseUrl: `${baseB}/v1`,
+    });
+    const bridgeConn = await json("/api/providers", "POST", {
+      provider: bridgeNode.id,
+      name: "dejana-bridge",
+      apiKey: bridgeKeyB.key,
+    });
+    const bridgeId = bridgeConn.connection?.id || bridgeConn.id;
+    assert.equal(typeof bridgeId, "string");
+    const bridgeProbe = await json(`/api/providers/${bridgeId}/test`, "POST", {});
+    assert.equal(bridgeProbe.valid, true, "loopback bridge probe must succeed");
+    const comboA = await json("/api/combos", "POST", {
+      name: "a-group",
+      strategy: "priority",
+      models: ["dejana/omniroute/b-group"],
+    });
+    await json("/api/model-combo-mappings", "POST", {
+      pattern: "omniroute/a-group",
+      comboId: comboA.id,
+      priority: 100,
+      enabled: true,
+    });
+    const clientA = await json("/api/keys", "POST", {
+      name: "client-a",
+      modelAccessMode: "restricted",
+      allowedModels: ["a-group", "omniroute/a-group"],
+      allowedCombos: ["a-group"],
+      scopes: [],
+      expiresAt: null,
+    });
+    redactions.push(clientA.key);
+    const catalogA = await json("/v1/models", "GET", undefined, clientA.key);
+    assert(catalogA.data.some(entry => entry.id === "a-group"), "A must discover a-group");
+    assert(!catalogA.data.some(entry => entry.id === "b-group"), "A must not discover B-local combos");
+    const forwardCalls = inferenceCalls;
+    const forwarded = await json(
+      "/v1/chat/completions",
+      "POST",
+      {
+        model: "omniroute/a-group",
+        messages: [{ role: "user", content: "forward test" }],
+        stream: false,
+        max_tokens: 8,
+      },
+      clientA.key,
+    );
+    assert.equal(forwarded.choices[0].message.content, "local mock response");
+    assert.equal(inferenceCalls, forwardCalls + 1, "forwarded request must reach the shared mock once");
+    const deniedAcross = await request(
+      "/v1/chat/completions",
+      "POST",
+      { model: "bsmoke/test", messages: [{ role: "user", content: "direct" }], stream: false, max_tokens: 8 },
+      clientA.key,
+    );
+    assert.equal(deniedAcross.status, 403, "B-local model must stay denied across the bridge");
+    const comboAId = comboA.id;
+    await json(`/api/combos/${comboAId}`, "PUT", {
+      name: "a-group",
+      strategy: "priority",
+      models: ["dejana/omniroute/b-group"],
+    });
+    const keyHashBefore = (await json("/api/keys")).keys.find(entry => entry.id === clientA.id)?.keyHash;
+    await json(`/api/keys/${clientA.id}`, "PATCH", { scopes: [] });
+    const keyAfter = (await json("/api/keys")).keys.find(entry => entry.id === clientA.id);
+    assert.equal(keyAfter?.keyHash, keyHashBefore, "idempotent re-apply must preserve credential identity");
+    assert.equal((await json(`/api/providers/${bridgeId}/test`, "POST", {})).valid, true, "bridge must stay valid");
+    assert.equal(
+      (
+        await json(
+          "/v1/chat/completions",
+          "POST",
+          {
+            model: "omniroute/a-group",
+            messages: [{ role: "user", content: "forward again" }],
+            stream: false,
+            max_tokens: 8,
+          },
+          clientA.key,
+        )
+      ).choices[0].message.content,
+      "local mock response",
+    );
+    console.log("PASS: two-instance forwarding and idempotent re-apply");
+    const badConn = await json("/api/providers", "POST", {
+      provider: bridgeNode.id,
+      name: "recovery-probe",
+      apiKey: "bad-key",
+    });
+    const badId = badConn.connection?.id || badConn.id;
+    const badProbe = await request(`/api/providers/${badId}/test`, "POST", {});
+    assert.equal(badProbe.status, 200);
+    assert.equal((await badProbe.json()).valid, false, "bad credential must fail the probe");
+    assert.equal(
+      (await json("/api/providers")).connections.find(entry => entry.id === badId)?.isActive,
+      false,
+      "failed probe must not activate",
+    );
+    await json(`/api/providers/${badId}`, "PUT", { apiKey: bridgeKeyB.key });
+    assert.equal((await json(`/api/providers/${badId}/test`, "POST", {})).valid, true, "fixed credential must recover");
+    assert.equal(
+      (await json("/api/providers")).connections.find(entry => entry.id === badId)?.isActive,
+      true,
+      "recovered probe must activate",
+    );
+    console.log("PASS: failed probe recovery without forced activation");
+    try {
+      process.kill(-childB.pid, "SIGTERM");
+    } catch {}
+    await delay(1000);
+    try {
+      process.kill(-childB.pid, "SIGKILL");
+    } catch {}
+    try {
+      fs.closeSync(logB);
+    } catch {}
+    console.log("PASS: two-instance suite complete");
   } catch (error) {
     let diagnostic = fs.readFileSync(path.join(root, "runtime.log"), "utf8");
+    try {
+      diagnostic += "\n--- runtime-b.log ---\n" + fs.readFileSync(path.join(root, "runtime-b.log"), "utf8");
+    } catch {}
     for (const value of redactions) if (value) diagnostic = diagnostic.split(value).join("<redacted>");
     diagnostic = diagnostic.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "<redacted-jwt>");
     console.error(diagnostic.split("\n").slice(-25).join("\n"));
     throw error;
   } finally {
+    if (childB && childB.pid) {
+      try {
+        process.kill(-childB.pid, "SIGTERM");
+      } catch {}
+      await delay(1000);
+      try {
+        process.kill(-childB.pid, "SIGKILL");
+      } catch {}
+    }
     if (child.pid) {
       try {
         process.kill(-child.pid, "SIGTERM");
