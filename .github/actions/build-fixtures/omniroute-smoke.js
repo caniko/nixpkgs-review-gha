@@ -56,7 +56,9 @@ async function main() {
   let nvidiaViaSocks = 0;
   let nvidiaDirect = 0;
   const downKey = crypto.randomBytes(32).toString("hex");
-  redactions.push(downKey);
+  const untrustedTlsKey = crypto.randomBytes(32).toString("hex");
+  const trustedTlsKey = crypto.randomBytes(32).toString("hex");
+  redactions.push(downKey, untrustedTlsKey, trustedTlsKey);
   const proxiedPorts = new Set();
   execSync(
     `openssl req -x509 -newkey rsa:2048 -nodes -keyout "${path.join(root, "ca-key.pem")}" -out "${path.join(root, "ca-cert.pem")}" -days 1 -subj "/CN=smoke-ca"`,
@@ -339,6 +341,10 @@ async function main() {
       },
       async (request, response) => {
         response.setHeader("Content-Type", "application/json");
+        if (request.url !== "/v1/chat/completions" || request.headers.authorization !== `Bearer ${trustedTlsKey}`) {
+          response.writeHead(401).end("{}");
+          return;
+        }
         let body = "";
         for await (const part of request) body += part;
         const payload = JSON.parse(body);
@@ -368,11 +374,12 @@ async function main() {
     const tlsConn = await json("/api/providers", "POST", {
       provider: "nvidia",
       name: "NVIDIA TLS",
-      apiKey: upstreamKey,
+      apiKey: untrustedTlsKey,
       providerSpecificData: { baseUrl: `https://nvidia-tls.invalid:${tlsPort}/v1/chat/completions` },
     });
     const tlsId = tlsConn.connection?.id || tlsConn.id;
     assert.equal(typeof tlsId, "string");
+    assert.notEqual(tlsId, nvidiaId, "TLS fixture must not replace the HTTP connection");
     const tlsProbe = await request(`/api/providers/${tlsId}/test`, "POST", {});
     assert.equal(tlsProbe.status, 200);
     assert.equal((await tlsProbe.json()).valid, false, "self-signed TLS must fail closed");
@@ -382,11 +389,13 @@ async function main() {
     const tlsTrustedConn = await json("/api/providers", "POST", {
       provider: "nvidia",
       name: "NVIDIA trusted TLS",
-      apiKey: upstreamKey,
+      apiKey: trustedTlsKey,
       providerSpecificData: { baseUrl: `https://nvidia-https.invalid:${tlsTrustedPort}/v1/chat/completions` },
     });
     const tlsTrustedId = tlsTrustedConn.connection?.id || tlsTrustedConn.id;
     assert.equal(typeof tlsTrustedId, "string");
+    assert.notEqual(tlsTrustedId, nvidiaId);
+    assert.notEqual(tlsTrustedId, tlsId);
     const tlsTrustedProbe = await json(`/api/providers/${tlsTrustedId}/test`, "POST", {});
     assert.equal(tlsTrustedProbe.valid, true, "trusted TLS must succeed through SOCKS");
     assert(tlsTrustedHits >= 1, "trusted TLS probe must reach the mock");
@@ -396,7 +405,11 @@ async function main() {
     // Proxy Off may use it; a failed assigned proxy must not fall back to it.
     await json(`/api/providers/${nvidiaId}`, "PUT", { proxyEnabled: false });
     const directBefore = nvidiaDirect;
-    assert.equal((await json(`/api/providers/${nvidiaId}/test`, "POST", {})).valid, true);
+    assert.equal(
+      (await json(`/api/providers/${nvidiaId}/test`, "POST", {})).valid,
+      true,
+      "direct control must validate",
+    );
     assert.equal(nvidiaDirect, directBefore + 1, "direct control must reach the mock");
     assert(fs.readFileSync(dnsLog, "utf8").length > 0, "direct control must exercise fixture DNS");
     await json(`/api/providers/${nvidiaId}`, "PUT", { proxyEnabled: true });
