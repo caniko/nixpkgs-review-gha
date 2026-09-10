@@ -1,0 +1,22 @@
+--- a/src/app/api/providers/[id]/models/route.ts
++++ b/src/app/api/providers/[id]/models/route.ts
+@@ -14,3 +14,4 @@
+ import { getCachedProviderConnectionById } from "@/lib/db/readCache";
+-import { resolveProxyForProvider } from "@/lib/db/proxies";
++import { resolveProxyForConnection } from "@/lib/db/settings";
++import { runWithProxyContext } from "@omniroute/open-sse/utils/proxyFetch.ts";
+ import {
+@@ -199,4 +200,5 @@
+-    // Resolve proxy for this provider (provider-level → global → direct)
+-    const proxy = await resolveProxyForProvider(provider);
+-
++    // Match connection testing, including explicit connection-level Proxy Off.
++    const { proxy } = await resolveProxyForConnection(id);
++    return await runWithProxyContext(proxy, async () => {
++
+     // #6247 — user-added custom models live in key_value namespace
+@@ -2414,3 +2416,4 @@
+     return buildApiDiscoveryResponse(allModels);
++    });
+   } catch (error) {
+     if (error instanceof SafeOutboundFetchError && error.code === "URL_GUARD_BLOCKED") {

@@ -31,7 +31,7 @@ let
             NEXT_DIST_DIR = ".build/next";
             OMNIROUTE_USE_TURBOPACK = "0";
           };
-          patches = (original.patches or []) ++ [ ./omniroute-nvidia-validation-proxy.patch ];
+          patches = (original.patches or []) ++ [ ./omniroute-nvidia-validation-proxy.patch ./omniroute-model-discovery-proxy.patch ];
           postPatch = original.postPatch + ''
             # build:cli must compile this source, not reuse a standalone tree.
             rm -rf .build/next .next dist
@@ -40,5 +40,5 @@ let
       );
   };
 in
-assert package.outPath == "/nix/store/r4yydg9dlvcix635gp7ddqc2wbn9pcdp-omniroute-3.8.51";
+assert package.outPath == "/nix/store/vpclmndklglmfnw49cgcw5i8f1sq81xd-omniroute-3.8.51";
 package
