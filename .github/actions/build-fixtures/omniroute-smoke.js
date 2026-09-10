@@ -40,6 +40,7 @@ async function main() {
   const redactions = [password, upstreamKey, jwtSecret, apiKeySecret];
   let tlsPort = 0;
   let tlsHits = 0;
+  let tls = null;
   let inferenceCalls = 0;
   let nvidiaCalls = 0;
   let nvidiaViaSocks = 0;
@@ -286,7 +287,7 @@ async function main() {
       `openssl req -x509 -newkey rsa:2048 -nodes -keyout "${path.join(root, "tls-key.pem")}" -out "${path.join(root, "tls-cert.pem")}" -days 1 -subj "/CN=nvidia.invalid" -addext "subjectAltName=DNS:nvidia.invalid,DNS:nvidia-tls.invalid"`,
       { stdio: "ignore" },
     );
-    const tls = https.createServer(
+    tls = https.createServer(
       {
         key: fs.readFileSync(path.join(root, "tls-key.pem")),
         cert: fs.readFileSync(path.join(root, "tls-cert.pem")),
@@ -311,8 +312,6 @@ async function main() {
     assert.equal(tlsProbe.status, 200);
     assert.equal((await tlsProbe.json()).valid, false, "self-signed TLS must fail closed");
     assert(tlsHits >= 1, "TLS probe must reach the mock before failing verification");
-    tls.closeAllConnections();
-    await new Promise(resolve => tls.close(resolve));
     console.log("PASS: NVIDIA TLS verification fails closed");
     await destroySocks();
     const downCalls = nvidiaCalls;
@@ -464,6 +463,12 @@ async function main() {
       } catch {}
     }
     await destroySocks().catch(() => {});
+    if (tls) {
+      try {
+        tls.closeAllConnections();
+      } catch {}
+      await new Promise(resolve => tls.close(resolve));
+    }
     mock.closeAllConnections();
     await new Promise(resolve => mock.close(resolve));
     fs.closeSync(log);
