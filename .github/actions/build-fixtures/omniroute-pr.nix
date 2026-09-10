@@ -40,5 +40,5 @@ let
       );
   };
 in
-assert package.outPath == "/nix/store/rs3q5c3cpz5c9xzkzrg3bjn2wzvb78zk-omniroute-3.8.51";
+assert package.outPath == "/nix/store/r4yydg9dlvcix635gp7ddqc2wbn9pcdp-omniroute-3.8.51";
 package
