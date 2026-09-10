@@ -1,6 +1,6 @@
 --- a/src/lib/providers/validation/specialtyInline.ts
 +++ b/src/lib/providers/validation/specialtyInline.ts
-@@ -256,18 +256,16 @@
+@@ -256,21 +256,22 @@
      const modelId = resolveNvidiaValidationModel(providerSpecificData);
 -    // #3226: use raw https (bypass the proxy/TLS-patched fetch) — the undici
 -    // dispatcher stalls against NVIDIA's endpoint, causing a 504 timeout.
@@ -21,3 +21,9 @@
      );
      if (res.status === 401 || res.status === 403) {
        return { valid: false, error: "Invalid API key" };
+     }
++    if (res.status >= 500) {
++      return { valid: false, error: `NVIDIA unavailable (HTTP ${res.status})`, statusCode: res.status };
++    }
+     // Any non-auth response (200, 400, 422, 429) means auth passed
+     return { valid: true, error: null };

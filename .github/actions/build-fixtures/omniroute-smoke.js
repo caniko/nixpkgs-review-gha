@@ -6,7 +6,8 @@ const path = require("node:path");
 const http = require("node:http");
 const net = require("node:net");
 const crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { execSync, spawn } = require("node:child_process");
+const https = require("node:https");
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const listen = server => new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -37,16 +38,28 @@ async function main() {
   const jwtSecret = crypto.randomBytes(32).toString("hex");
   const apiKeySecret = crypto.randomBytes(32).toString("hex");
   const redactions = [password, upstreamKey, jwtSecret, apiKeySecret];
+  let tlsPort = 0;
+  let tlsHits = 0;
   let inferenceCalls = 0;
   let nvidiaCalls = 0;
+  let nvidiaViaSocks = 0;
+  let nvidiaDirect = 0;
+  const downKey = crypto.randomBytes(32).toString("hex");
+  redactions.push(downKey);
+  const proxiedPorts = new Set();
   const mock = http.createServer(async (request, response) => {
     response.setHeader("Content-Type", "application/json");
     if (request.url === "/v1/models") {
       response.end(JSON.stringify({ object: "list", data: [{ id: "test", object: "model" }] }));
       return;
     }
-    if (request.url !== "/v1/chat/completions" || request.headers.authorization !== `Bearer ${upstreamKey}`) {
+    const auth = request.headers.authorization;
+    if (request.url !== "/v1/chat/completions" || (auth !== `Bearer ${upstreamKey}` && auth !== `Bearer ${downKey}`)) {
       response.writeHead(404).end("{}");
+      return;
+    }
+    if (auth === `Bearer ${downKey}`) {
+      response.writeHead(503).end(JSON.stringify({ error: "upstream unavailable" }));
       return;
     }
     let body = "";
@@ -58,6 +71,8 @@ async function main() {
     }
     if (payload.messages?.[0]?.content === "test" && payload.max_tokens === 1) {
       nvidiaCalls++;
+      if (request.socket.viaSocks) nvidiaViaSocks++;
+      else nvidiaDirect++;
       response.end(
         JSON.stringify({
           id: "nvidia-probe",
@@ -88,6 +103,9 @@ async function main() {
   });
   await listen(mock);
   const mockPort = mock.address().port;
+  mock.on("connection", socket => {
+    socket.viaSocks = proxiedPorts.has(socket.remotePort);
+  });
   const tunnels = new Set();
   let socksConnects = 0;
   const socks = net.createServer(socket => {
@@ -111,14 +129,18 @@ async function main() {
       if (stage !== "req") return;
       const parsed = parseSocksConnect(buf);
       if (!parsed) return;
-      if (parsed.error || parsed.host !== "nvidia.invalid" || parsed.port !== mockPort) return socket.destroy();
+      const allowed =
+        (parsed.host === "nvidia.invalid" && parsed.port === mockPort) ||
+        (tlsPort !== 0 && parsed.host === "nvidia-tls.invalid" && parsed.port === tlsPort);
+      if (parsed.error || !allowed) return socket.destroy();
       buf = buf.subarray(parsed.need);
       socksConnects++;
-      const dest = net.connect(mockPort, "127.0.0.1");
+      const dest = net.connect(parsed.port, "127.0.0.1");
       tunnels.add(dest);
       dest.on("connect", () => {
+        proxiedPorts.add(dest.localPort);
         socket.setTimeout(0);
-        socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, mockPort >> 8, mockPort & 0xff]));
+        socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, parsed.port >> 8, parsed.port & 0xff]));
         socket.removeAllListeners("data");
         if (buf.length) dest.write(buf);
         socket.pipe(dest);
@@ -160,6 +182,7 @@ async function main() {
       HOSTNAME: "127.0.0.1",
       OMNIROUTE_SERVER_HOST: "127.0.0.1",
       REQUIRE_API_KEY: "true",
+      PROXY_FAIL_OPEN: "false",
       OMNIROUTE_ENABLE_LIVE_WS: "0",
     },
   });
@@ -242,6 +265,55 @@ async function main() {
     assert.equal(nvidiaCalls, nvidiaBefore + 1, "explicit NVIDIA probe must hit the mock once");
     const nvidiaRow = (await json("/api/providers")).connections.find(entry => entry.id === nvidiaId);
     assert.equal(nvidiaRow?.isActive, true);
+    assert(nvidiaViaSocks >= 1, "NVIDIA probe must arrive through SOCKS");
+    assert.equal(nvidiaDirect, 0, "NVIDIA probe must never bypass SOCKS");
+    const downRow = await json("/api/providers", "POST", {
+      provider: "nvidia",
+      name: "NVIDIA outage",
+      apiKey: downKey,
+      providerSpecificData: { baseUrl: `http://nvidia.invalid:${mockPort}/v1/chat/completions` },
+    });
+    const downId = downRow.connection?.id || downRow.id;
+    assert.equal(typeof downId, "string");
+    const downProbe = await request(`/api/providers/${downId}/test`, "POST", {});
+    assert.equal(downProbe.status, 200);
+    assert.equal((await downProbe.json()).valid, false, "NVIDIA 5xx must fail the probe");
+    const downListed = (await json("/api/providers")).connections.find(entry => entry.id === downId);
+    assert.equal(downListed?.isActive, false, "failed NVIDIA probe must not activate");
+    assert.equal((await json("/api/providers")).connections.find(entry => entry.id === nvidiaId)?.isActive, true);
+    console.log("PASS: NVIDIA 5xx fails closed");
+    execSync(
+      `openssl req -x509 -newkey rsa:2048 -nodes -keyout "${path.join(root, "tls-key.pem")}" -out "${path.join(root, "tls-cert.pem")}" -days 1 -subj "/CN=nvidia.invalid" -addext "subjectAltName=DNS:nvidia.invalid,DNS:nvidia-tls.invalid"`,
+      { stdio: "ignore" },
+    );
+    const tls = https.createServer(
+      {
+        key: fs.readFileSync(path.join(root, "tls-key.pem")),
+        cert: fs.readFileSync(path.join(root, "tls-cert.pem")),
+      },
+      (request, response) => {
+        tlsHits++;
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end("{}");
+      },
+    );
+    await new Promise(resolve => tls.listen(0, "127.0.0.1", resolve));
+    tlsPort = tls.address().port;
+    const tlsConn = await json("/api/providers", "POST", {
+      provider: "nvidia",
+      name: "NVIDIA TLS",
+      apiKey: upstreamKey,
+      providerSpecificData: { baseUrl: `https://nvidia-tls.invalid:${tlsPort}/v1/chat/completions` },
+    });
+    const tlsId = tlsConn.connection?.id || tlsConn.id;
+    assert.equal(typeof tlsId, "string");
+    const tlsProbe = await request(`/api/providers/${tlsId}/test`, "POST", {});
+    assert.equal(tlsProbe.status, 200);
+    assert.equal((await tlsProbe.json()).valid, false, "self-signed TLS must fail closed");
+    assert(tlsHits >= 1, "TLS probe must reach the mock before failing verification");
+    tls.closeAllConnections();
+    await new Promise(resolve => tls.close(resolve));
+    console.log("PASS: NVIDIA TLS verification fails closed");
     await destroySocks();
     const downCalls = nvidiaCalls;
     const nvidiaDown = await request(`/api/providers/${nvidiaId}/test`, "POST", {});
