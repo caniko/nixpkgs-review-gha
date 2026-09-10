@@ -105,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           packages=(jq python3)
-          if [[ "$RUN_SMOKE" == true ]]; then packages+=(nodejs); fi
+          if [[ "$RUN_SMOKE" == true ]]; then packages+=(nodejs bash coreutils curl openssl); fi
           if [[ "$PUSH_CACHE" == true ]]; then packages+=(attic-client); fi
           nix profile add "${packages[@]/#/.#}" --builders ''
 

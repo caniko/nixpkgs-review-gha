@@ -6,7 +6,8 @@ const path = require("node:path");
 const http = require("node:http");
 const net = require("node:net");
 const crypto = require("node:crypto");
-const { execSync, spawn } = require("node:child_process");
+const { execFile, execSync, spawn } = require("node:child_process");
+const { promisify } = require("node:util");
 const https = require("node:https");
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -47,6 +48,7 @@ async function main() {
   let tlsTrustedViaSocks = 0;
   let tlsTrusted = null;
   let childB = null;
+  let logB;
   let inferenceCalls = 0;
   let nvidiaCalls = 0;
   let nvidiaViaSocks = 0;
@@ -209,6 +211,8 @@ async function main() {
       REQUIRE_API_KEY: "true",
       NODE_EXTRA_CA_CERTS: path.join(root, "ca-cert.pem"),
       PROXY_FAIL_OPEN: "false",
+      APP_LOG_TO_FILE: "true",
+      APP_LOG_FILE_PATH: path.join(root, "app-a.log"),
       OMNIROUTE_ENABLE_LIVE_WS: "0",
     },
   });
@@ -522,7 +526,11 @@ async function main() {
     const portB = reservationB.address().port;
     await new Promise(resolve => reservationB.close(resolve));
     const baseB = `http://127.0.0.1:${portB}`;
-    const logB = fs.openSync(path.join(root, "runtime-b.log"), "wx", 0o600);
+    logB = fs.openSync(path.join(root, "runtime-b.log"), "wx", 0o600);
+    const passwordB = crypto.randomBytes(32).toString("hex");
+    const jwtSecretB = crypto.randomBytes(32).toString("hex");
+    const apiKeySecretB = crypto.randomBytes(32).toString("hex");
+    redactions.push(passwordB, jwtSecretB, apiKeySecretB);
     childB = spawn(executable, ["--no-open"], {
       detached: true,
       stdio: ["ignore", logB, logB],
@@ -530,9 +538,9 @@ async function main() {
         ...process.env,
         DATA_DIR: path.join(root, "state-b"),
         HOME: root,
-        INITIAL_PASSWORD: password,
-        JWT_SECRET: jwtSecret,
-        API_KEY_SECRET: apiKeySecret,
+        INITIAL_PASSWORD: passwordB,
+        JWT_SECRET: jwtSecretB,
+        API_KEY_SECRET: apiKeySecretB,
         PORT: String(portB),
         OMNIROUTE_PORT: String(portB),
         API_HOST: "127.0.0.1",
@@ -541,6 +549,8 @@ async function main() {
         OMNIROUTE_SERVER_HOST: "127.0.0.1",
         REQUIRE_API_KEY: "true",
         PROXY_FAIL_OPEN: "false",
+        APP_LOG_TO_FILE: "true",
+        APP_LOG_FILE_PATH: path.join(root, "app-b.log"),
         OMNIROUTE_ENABLE_LIVE_WS: "0",
       },
     });
@@ -575,169 +585,136 @@ async function main() {
       await delay(1000);
     }
     assert(readyB, "gateway B did not become ready within 90 seconds");
-    const loginB = await requestB("/api/auth/login", "POST", { password });
+    const loginB = await requestB("/api/auth/login", "POST", { password: passwordB });
     assert(loginB.ok, `B login: HTTP ${loginB.status}`);
     cookieB = loginB.headers
       .getSetCookie()
       .map(value => value.split(";")[0])
       .join("; ");
     assert(cookieB);
-    const { node: nodeB } = await jsonB("/api/provider-nodes", "POST", {
-      name: "B smoke",
-      prefix: "bsmoke",
-      type: "openai-compatible",
-      apiType: "chat",
-      baseUrl: `http://127.0.0.1:${mock.address().port}/v1`,
-    });
-    await jsonB("/api/providers", "POST", { provider: nodeB.id, name: "B smoke", apiKey: upstreamKey });
-    await jsonB("/api/provider-models", "POST", { provider: nodeB.id, modelId: "test", apiFormat: "chat-completions" });
-    const comboB = await jsonB("/api/combos", "POST", { name: "b-group", strategy: "priority", models: ["bsmoke/test"] });
-    await jsonB("/api/model-combo-mappings", "POST", {
-      pattern: "omniroute/b-group",
-      comboId: comboB.id,
-      priority: 100,
-      enabled: true,
-    });
-    const bridgeKeyB = await jsonB("/api/keys", "POST", {
-      name: "bridge-b",
-      modelAccessMode: "restricted",
-      allowedModels: ["b-group", "omniroute/b-group"],
-      allowedCombos: ["b-group"],
-      scopes: [],
-      expiresAt: null,
-    });
-    redactions.push(bridgeKeyB.key);
-    const catalogB = await jsonB("/v1/models", "GET", undefined, bridgeKeyB.key);
-    assert(catalogB.data.some(entry => entry.id === "b-group"), "B must discover b-group for the bridge key");
-    const { node: bridgeNode } = await json("/api/provider-nodes", "POST", {
-      name: "dejana-bridge",
-      prefix: "dejana",
-      type: "openai-compatible",
-      apiType: "chat",
-      baseUrl: `${baseB}/v1`,
-    });
-    const bridgeConn = await json("/api/providers", "POST", {
-      provider: bridgeNode.id,
-      name: "dejana-bridge",
-      apiKey: bridgeKeyB.key,
-    });
-    const bridgeId = bridgeConn.connection?.id || bridgeConn.id;
-    assert.equal(typeof bridgeId, "string");
-    const bridgeProbe = await json(`/api/providers/${bridgeId}/test`, "POST", {});
-    assert.equal(bridgeProbe.valid, true, "loopback bridge probe must succeed");
-    const comboA = await json("/api/combos", "POST", {
-      name: "a-group",
-      strategy: "priority",
-      models: ["dejana/omniroute/b-group"],
-    });
-    await json("/api/model-combo-mappings", "POST", {
-      pattern: "omniroute/a-group",
-      comboId: comboA.id,
-      priority: 100,
-      enabled: true,
-    });
-    const clientA = await json("/api/keys", "POST", {
-      name: "client-a",
-      modelAccessMode: "restricted",
-      allowedModels: ["a-group", "omniroute/a-group"],
-      allowedCombos: ["a-group"],
-      scopes: [],
-      expiresAt: null,
-    });
-    redactions.push(clientA.key);
-    const catalogA = await json("/v1/models", "GET", undefined, clientA.key);
-    assert(catalogA.data.some(entry => entry.id === "a-group"), "A must discover a-group");
-    assert(!catalogA.data.some(entry => entry.id === "b-group"), "A must not discover B-local combos");
-    const forwardCalls = inferenceCalls;
-    const forwarded = await json(
-      "/v1/chat/completions",
-      "POST",
-      {
-        model: "omniroute/a-group",
-        messages: [{ role: "user", content: "forward test" }],
-        stream: false,
-        max_tokens: 8,
-      },
-      clientA.key,
+    const fixture = name => path.join(__dirname, name);
+    const helperHash = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(fixture("omniroute-provision.sh")))
+      .digest("hex");
+    assert.equal(helperHash, fs.readFileSync(fixture("omniroute-provision.sha256"), "utf8").trim());
+    console.log(`Provisioner SHA-256: ${helperHash}`);
+    const testRoot = path.join(root, "provision");
+    fs.mkdirSync(testRoot, { mode: 0o700 });
+    fs.mkdirSync(path.join(testRoot, "credentials"), { mode: 0o700 });
+    fs.writeFileSync(path.join(testRoot, "credentials/upstream"), upstreamKey, { mode: 0o600 });
+    fs.writeFileSync(path.join(testRoot, "a.headers"), `Cookie: ${cookie}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(testRoot, "b.headers"), `Cookie: ${cookieB}\n`, { mode: 0o600 });
+    const keyFiles = ["keys-a/can-client-key", "keys-b/dejana-client-key", "keys-b/dejana-bridge-key"];
+    async function provision(phase) {
+      let result;
+      try {
+        result = await promisify(execFile)("bash", [fixture("omniroute-provision-test.sh"), phase], {
+          env: {
+            ...process.env,
+            TEST_ROOT: testRoot,
+            BASE_A: base,
+            BASE_B: baseB,
+            MOCK_BASE: `http://127.0.0.1:${mockPort}`,
+          },
+          timeout: 180000,
+          maxBuffer: 1024 * 1024,
+        });
+      } catch (error) {
+        fs.appendFileSync(path.join(root, "provision.log"), error.stderr || "driver failed", { mode: 0o600 });
+        throw new Error(`real provisioner ${phase} failed (exit ${error.code})`);
+      } finally {
+        for (const file of keyFiles) {
+          if (fs.existsSync(path.join(testRoot, file)))
+            redactions.push(fs.readFileSync(path.join(testRoot, file), "utf8").trim());
+        }
+      }
+      if (phase !== "snapshot") console.log(result.stdout.trim());
+      return result.stdout;
+    }
+    await provision("apply");
+    const clientKeyA = fs.readFileSync(path.join(testRoot, keyFiles[0]), "utf8").trim();
+    const bridgeKeyB = fs.readFileSync(path.join(testRoot, keyFiles[2]), "utf8").trim();
+    assert.equal(
+      (await requestB("/api/v1/me/status", "GET", undefined, clientKeyA)).status,
+      401,
+      "A key must not authenticate at B",
     );
-    assert.equal(forwarded.choices[0].message.content, "local mock response");
-    assert.equal(inferenceCalls, forwardCalls + 1, "forwarded request must reach the shared mock once");
+    assert.equal(
+      (await request("/api/v1/me/status", "GET", undefined, bridgeKeyB)).status,
+      401,
+      "B key must not authenticate at A",
+    );
+    const catalogB = await jsonB("/v1/models", "GET", undefined, bridgeKeyB);
+    assert(catalogB.data.some(entry => entry.id === "b-group"));
+    const catalogA = await json("/v1/models", "GET", undefined, clientKeyA);
+    assert(
+      catalogA.data.some(entry => entry.id === "a-group"),
+      "A must discover a-group",
+    );
+    assert(!catalogA.data.some(entry => entry.id === "b-group"), "A must not discover B-local combos");
+    async function forward(content) {
+      const calls = inferenceCalls;
+      const response = await json(
+        "/v1/chat/completions",
+        "POST",
+        {
+          model: "omniroute/a-group",
+          messages: [{ role: "user", content }],
+          stream: false,
+          max_tokens: 8,
+        },
+        clientKeyA,
+      );
+      assert.equal(response.choices[0].message.content, "local mock response");
+      assert.equal(inferenceCalls, calls + 1, "forwarded request must reach the mock exactly once");
+    }
+    await forward("after first real apply");
+    const denialCalls = inferenceCalls;
     const deniedAcross = await request(
       "/v1/chat/completions",
       "POST",
-      { model: "bsmoke/test", messages: [{ role: "user", content: "direct" }], stream: false, max_tokens: 8 },
-      clientA.key,
+      { model: "dejana/bsmoke/test", messages: [{ role: "user", content: "direct" }], stream: false, max_tokens: 8 },
+      clientKeyA,
     );
     assert.equal(deniedAcross.status, 403, "B-local model must stay denied across the bridge");
-    const comboAId = comboA.id;
-    await json(`/api/combos/${comboAId}`, "PUT", {
-      name: "a-group",
-      strategy: "priority",
-      models: ["dejana/omniroute/b-group"],
-    });
-    const keyHashBefore = (await json("/api/keys")).keys.find(entry => entry.id === clientA.id)?.keyHash;
-    await json(`/api/keys/${clientA.id}`, "PATCH", { scopes: [] });
-    const keyAfter = (await json("/api/keys")).keys.find(entry => entry.id === clientA.id);
-    assert.equal(keyAfter?.keyHash, keyHashBefore, "idempotent re-apply must preserve credential identity");
-    assert.equal((await json(`/api/providers/${bridgeId}/test`, "POST", {})).valid, true, "bridge must stay valid");
-    assert.equal(
-      (
-        await json(
-          "/v1/chat/completions",
-          "POST",
-          {
-            model: "omniroute/a-group",
-            messages: [{ role: "user", content: "forward again" }],
-            stream: false,
-            max_tokens: 8,
-          },
-          clientA.key,
-        )
-      ).choices[0].message.content,
-      "local mock response",
+    const deniedAtB = await requestB(
+      "/v1/chat/completions",
+      "POST",
+      {
+        model: "bsmoke/test",
+        messages: [{ role: "user", content: "direct at B" }],
+        stream: false,
+        max_tokens: 8,
+      },
+      bridgeKeyB,
     );
-    console.log("PASS: two-instance forwarding and idempotent re-apply");
-    const badConn = await json("/api/providers", "POST", {
-      provider: bridgeNode.id,
-      name: "recovery-probe",
-      apiKey: "bad-key",
-    });
-    const badId = badConn.connection?.id || badConn.id;
-    const badProbe = await request(`/api/providers/${badId}/test`, "POST", {});
-    assert.equal(badProbe.status, 200);
-    assert.equal((await badProbe.json()).valid, false, "bad credential must fail the probe");
+    assert.equal(deniedAtB.status, 403);
+    assert.equal(inferenceCalls, denialCalls, "denied requests must not reach upstream");
+    const beforeApply = await provision("snapshot");
+    await provision("mismatch");
+    assert.equal(await provision("snapshot"), beforeApply, "swapped key must not mutate resources or files");
+    await provision("apply");
     assert.equal(
-      (await json("/api/providers")).connections.find(entry => entry.id === badId)?.isActive,
-      false,
-      "failed probe must not activate",
+      await provision("snapshot"),
+      beforeApply,
+      "second real apply must preserve IDs, policy and credential bytes",
     );
-    await json(`/api/providers/${badId}`, "PUT", { apiKey: bridgeKeyB.key });
-    assert.equal((await json(`/api/providers/${badId}/test`, "POST", {})).valid, true, "fixed credential must recover");
-    assert.equal(
-      (await json("/api/providers")).connections.find(entry => entry.id === badId)?.isActive,
-      true,
-      "recovered probe must activate",
-    );
-    console.log("PASS: failed probe recovery without forced activation");
-    try {
-      process.kill(-childB.pid, "SIGTERM");
-    } catch {}
-    await delay(1000);
-    try {
-      process.kill(-childB.pid, "SIGKILL");
-    } catch {}
-    try {
-      fs.closeSync(logB);
-    } catch {}
-    console.log("PASS: two-instance suite complete");
+    await forward("after second real apply");
+    await provision("recovery");
+    await forward("through the recovered connection");
+    console.log("PASS: real two-instance provisioning, identity, forwarding and cooldown recovery");
   } catch (error) {
-    let diagnostic = fs.readFileSync(path.join(root, "runtime.log"), "utf8");
-    try {
-      diagnostic += "\n--- runtime-b.log ---\n" + fs.readFileSync(path.join(root, "runtime-b.log"), "utf8");
-    } catch {}
+    let diagnostic = "";
+    for (const file of ["runtime.log", "runtime-b.log", "app-a.log", "app-b.log", "provision.log"]) {
+      if (fs.existsSync(path.join(root, file))) {
+        diagnostic +=
+          `\n--- ${file} ---\n` + fs.readFileSync(path.join(root, file), "utf8").split("\n").slice(-30).join("\n");
+      }
+    }
     for (const value of redactions) if (value) diagnostic = diagnostic.split(value).join("<redacted>");
     diagnostic = diagnostic.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "<redacted-jwt>");
-    console.error(diagnostic.split("\n").slice(-25).join("\n"));
+    console.error(diagnostic);
     throw error;
   } finally {
     if (childB && childB.pid) {
@@ -770,6 +747,7 @@ async function main() {
     mock.closeAllConnections();
     await new Promise(resolve => mock.close(resolve));
     fs.closeSync(log);
+    if (logB !== undefined) fs.closeSync(logB);
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
