@@ -34,6 +34,8 @@ async function main() {
   const executable = path.join(outputs[0].outputs.out, "bin/omniroute");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-package-test-"));
   fs.chmodSync(root, 0o700);
+  const dnsLog = path.join(root, "direct-dns.log");
+  fs.writeFileSync(dnsLog, "", { mode: 0o600 });
   const password = crypto.randomBytes(32).toString("hex");
   const upstreamKey = crypto.randomBytes(32).toString("hex");
   const jwtSecret = crypto.randomBytes(32).toString("hex");
@@ -211,6 +213,8 @@ async function main() {
       REQUIRE_API_KEY: "true",
       NODE_EXTRA_CA_CERTS: path.join(root, "ca-cert.pem"),
       PROXY_FAIL_OPEN: "false",
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require=${JSON.stringify(path.join(__dirname, "omniroute-test-dns.cjs"))}`,
+      OMNIROUTE_TEST_DNS_LOG: dnsLog,
       APP_LOG_TO_FILE: "true",
       APP_LOG_FILE_PATH: path.join(root, "app-a.log"),
       OMNIROUTE_ENABLE_LIVE_WS: "0",
@@ -388,13 +392,26 @@ async function main() {
     assert(tlsTrustedHits >= 1, "trusted TLS probe must reach the mock");
     assert(tlsTrustedViaSocks >= 1, "trusted TLS probe must arrive through SOCKS");
     console.log("PASS: NVIDIA trusted TLS succeeds through SOCKS");
+    // Negative control: the same target is reachable directly. Only explicit
+    // Proxy Off may use it; a failed assigned proxy must not fall back to it.
+    await json(`/api/providers/${nvidiaId}`, "PUT", { proxyEnabled: false });
+    const directBefore = nvidiaDirect;
+    assert.equal((await json(`/api/providers/${nvidiaId}/test`, "POST", {})).valid, true);
+    assert.equal(nvidiaDirect, directBefore + 1, "direct control must reach the mock");
+    assert(fs.readFileSync(dnsLog, "utf8").length > 0, "direct control must exercise fixture DNS");
+    await json(`/api/providers/${nvidiaId}`, "PUT", { proxyEnabled: true });
+    const proxiedBefore = nvidiaViaSocks;
+    assert.equal((await json(`/api/providers/${nvidiaId}/test`, "POST", {})).valid, true);
+    assert.equal(nvidiaViaSocks, proxiedBefore + 1, "restored proxy policy must use SOCKS");
     await destroySocks();
     const downCalls = nvidiaCalls;
+    const directLookups = fs.readFileSync(dnsLog, "utf8");
     const nvidiaDown = await request(`/api/providers/${nvidiaId}/test`, "POST", {});
     assert.equal(nvidiaDown.status, 200);
     const nvidiaDownBody = await nvidiaDown.json();
     assert.equal(nvidiaDownBody.valid, false, "NVIDIA probe must fail when SOCKS is down");
     assert.equal(nvidiaCalls, downCalls, "downed SOCKS must not reach the mock");
+    assert.equal(fs.readFileSync(dnsLog, "utf8"), directLookups, "failed proxy must not attempt direct DNS resolution");
     console.log("PASS: NVIDIA proxy isolation");
     const model = "smoke/test";
     const policy = { modelAccessMode: "restricted", allowedModels: [model], allowedCombos: [], scopes: [] };
