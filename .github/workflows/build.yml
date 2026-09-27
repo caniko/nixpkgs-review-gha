@@ -104,12 +104,14 @@ jobs:
         if: ${{ runner.os == 'Linux' }}
         run: |
           set -euo pipefail
-          if ! swapon --show | grep -q .; then
-            sudo fallocate -l 24G /mnt/build.swap
-            sudo chmod 600 /mnt/build.swap
-            sudo mkswap /mnt/build.swap
-            sudo swapon /mnt/build.swap
-          fi
+          # Replace the stock ~3 GiB swap outright: it short-circuits any
+          # conditional provisioning and is far too small for next-build.
+          sudo swapoff -a || true
+          sudo rm -f /mnt/build.swap
+          sudo fallocate -l 32G /mnt/build.swap || sudo dd if=/dev/zero of=/mnt/build.swap bs=1M count=32768
+          sudo chmod 600 /mnt/build.swap
+          sudo mkswap /mnt/build.swap
+          sudo swapon /mnt/build.swap
           free -h
 
       - name: install test and publication tools
