@@ -1,0 +1,24 @@
+--- a/open-sse/services/defaultReasoningEffort.ts
++++ b/open-sse/services/defaultReasoningEffort.ts
+@@ -50,2 +50,21 @@
+   if (!body || typeof body !== "object") return body;
++  // Canix policy: fixed fallback tiers must survive caller reasoning fields.
++  const fixedEffort = /(?:^|\/)gpt-6-astra(?:-(?:none|low|medium|high|xhigh|max))?$/.test(modelId)
++    ? "low"
++    : /(?:^|\/)gpt-5\.6-luna$/.test(modelId) && suffixEffort != null && ["low", "high", "xhigh"].includes(suffixEffort)
++      ? suffixEffort
++      : null;
++  if (fixedEffort) {
++    const forced: Record<string, unknown> = { ...body, reasoning_effort: fixedEffort };
++    delete forced.thinking;
++    if (forced.reasoning && typeof forced.reasoning === "object" && !Array.isArray(forced.reasoning)) {
++      const reasoning: Record<string, unknown> = { ...forced.reasoning, effort: fixedEffort };
++      delete reasoning.enabled;
++      delete reasoning.max_tokens;
++      forced.reasoning = reasoning;
++    } else {
++      delete forced.reasoning;
++    }
++    return forced as T;
++  }
+   if (hasExplicitReasoningField(body)) return body;

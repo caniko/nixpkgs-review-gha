@@ -1,0 +1,91 @@
+diff --git a/src/shared/middleware/chatBodyAdmission.ts b/src/shared/middleware/chatBodyAdmission.ts
+--- a/src/shared/middleware/chatBodyAdmission.ts
++++ b/src/shared/middleware/chatBodyAdmission.ts
+@@ -293,6 +293,9 @@ export class ChatAdmissionController {
+         released = true;
+         this.#activeHealthy = Math.max(0, this.#activeHealthy - 1);
+         done();
++        // Wake one parked waiter: freed headroom is claimable on its next
++        // loop turn, same as a freed primary lease.
++        this.#dispatchFair();
+       },
+     };
+   }
+@@ -393,13 +396,24 @@ export class ChatAdmissionController {
+     timeoutMs: number,
+     signal?: AbortSignal,
+     queuedBytes = 0,
+-    sessionKey = "default"
++    sessionKey = "default",
++    /**
++     * Optional bounded extra capacity consulted on every loop turn after the
++     * primary lease (e.g. heap-gated healthy headroom). Lets a waiter parked
++     * behind a slow upstream stream claim headroom freed while it waited
++     * instead of shedding at the deadline.
++     */
++    tryHeadroom?: () => ChatAdmissionLease | null
+   ): Promise<ChatAdmissionLease | null> {
+     const deadline = Date.now() + Math.max(0, Math.floor(timeoutMs));
+     for (;;) {
+       if (signal?.aborted) return null;
+       const lease = this.tryAcquireHeavy();
+       if (lease) return lease;
++      // Primary-first: headroom is overflow only, never preferred while the
++      // primary lease is free.
++      const headroom = tryHeadroom?.();
++      if (headroom) return headroom;
+       const remaining = deadline - Date.now();
+       if (remaining <= 0) {
+         // Wait window exhausted (or queueMs=0 immediate reject) with capacity still
+@@ -837,7 +851,11 @@ export async function admitChatStructure(
+     options.queueMs ?? 0,
+     options.signal,
+     CHAT_LARGE_BODY_BYTES,
+-    options.sessionId
++    options.sessionId,
++    // Same heap-gated overflow as the fast path above, so a waiter parked
++    // here also claims headroom freed mid-wait instead of shedding while a
++    // woken non-participating waiter re-parks.
++    () => (heapPressureCheck() ? null : controller.tryAcquireHealthyHeadroom())
+   );
+   return acquired
+     ? { admit: true, lease: acquired }
+@@ -956,6 +974,13 @@ export async function admitChatRequest(
+     largeBodyBytes?: number;
+     hardMaxBytes?: number;
+     queueMs?: number;
++    /**
++     * Heap-pressure probe consulted only when the primary heavyweight lease is
++     * busy (same contract as admitChatStructure). Defaults to
++     * `defaultHeapPressureCheck` (live V8 heap stats). Tests inject a
++     * deterministic override.
++     */
++    heapPressureCheck?: () => boolean;
+   } = {}
+ ): Promise<ChatRequestAdmission> {
+   const sessionId = options.sessionId ?? resolveSessionId(request);
+@@ -1009,9 +1034,23 @@ export async function admitChatRequest(
+   }
+ 
+   let lease: ChatAdmissionLease | null = null;
++  const heapPressureCheck = options.heapPressureCheck ?? defaultHeapPressureCheck;
++  // Heap-gated overflow shared with the wait loop below: consulted only after
++  // the primary lease, so headroom never preempts free primary capacity.
++  const tryHeadroom = () =>
++    heapPressureCheck() ? null : controller.tryAcquireHealthyHeadroom();
+   const reserve = async (bytes = 0): Promise<boolean> => {
+     if (lease) return true;
+-    lease = await controller.acquireHeavyWithin(queueMs, request.signal, bytes, sessionId);
++    // Sole entry point is the signal-aware loop: it checks cancellation first
++    // on every turn, then primary, then headroom — an aborted request never
++    // takes a lease here.
++    lease = await controller.acquireHeavyWithin(
++      queueMs,
++      request.signal,
++      bytes,
++      sessionId,
++      tryHeadroom
++    );
+     return lease !== null;
+   };
+ 

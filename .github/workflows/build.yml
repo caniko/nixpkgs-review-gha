@@ -1,0 +1,176 @@
+name: build
+run-name: "build ${{ inputs.packages }}"
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Packages"
+        required: false
+        type: string
+      push-to-cache:
+        description: "Publish successful outputs to the configured dedicated Attic cache"
+        required: true
+        type: boolean
+        default: false
+      omniroute-smoke:
+        description: "Run the local-mock expiry smoke test for the OmniRoute fixture before publication"
+        required: true
+        type: boolean
+        default: false
+      x86_64-linux:
+        description: "Build on x86_64-linux"
+        required: true
+        type: boolean
+        default: true
+      aarch64-linux:
+        description: "Build on aarch64-linux"
+        required: true
+        type: boolean
+        default: true
+      x86_64-darwin:
+        description: "Build on x86_64-darwin"
+        required: true
+        type: choice
+        default: yes_sandbox_relaxed
+        options:
+          - "no"
+          - yes_sandbox_false
+          - yes_sandbox_relaxed
+          - yes_sandbox_true
+      aarch64-darwin:
+        description: "Build on aarch64-darwin"
+        required: true
+        type: choice
+        default: yes_sandbox_relaxed
+        options:
+          - "no"
+          - yes_sandbox_false
+          - yes_sandbox_relaxed
+          - yes_sandbox_true
+      upterm:
+        description: "Start upterm session after nix build"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        system:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-darwin
+          - aarch64-darwin
+        exclude:
+          - system: ${{ !inputs.x86_64-linux && 'x86_64-linux' || '' }}
+          - system: ${{ !inputs.aarch64-linux && 'aarch64-linux' || '' }}
+          - system: ${{ inputs.x86_64-darwin == 'no' && 'x86_64-darwin' || '' }}
+          - system: ${{ inputs.aarch64-darwin == 'no' && 'aarch64-darwin' || '' }}
+    runs-on: >-
+      ${{ (matrix.system == 'x86_64-linux' && 'ubuntu-latest')
+      || (matrix.system == 'aarch64-linux' && 'ubuntu-24.04-arm')
+      || (matrix.system == 'x86_64-darwin' && 'macos-latest')
+      || (matrix.system == 'aarch64-darwin' && 'macos-latest') }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/actions
+
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
+        with:
+          extra-nix-config: ${{ vars.EXTRA_NIX_CONFIG }}
+          system: ${{ matrix.system }}
+          sandbox: ${{
+            (matrix.system == 'x86_64-darwin' && inputs.x86_64-darwin == 'yes_sandbox_false'
+            || matrix.system == 'aarch64-darwin' && inputs.aarch64-darwin == 'yes_sandbox_false') && 'false'
+            || (matrix.system == 'x86_64-darwin' && inputs.x86_64-darwin == 'yes_sandbox_relaxed'
+            || matrix.system == 'aarch64-darwin' && inputs.aarch64-darwin == 'yes_sandbox_relaxed') && 'relaxed'
+            || 'true' }}
+          builders: ${{ (vars.USE_BUILDERS == 'yes' || vars.USE_BUILDERS == 'always') && vars.BUILDERS || '' }}
+          ssh-key: ${{ (vars.USE_BUILDERS == 'yes' || vars.USE_BUILDERS == 'always') && secrets.SSH_KEY || '' }}
+          ssh-cert: ${{ (vars.USE_BUILDERS == 'yes' || vars.USE_BUILDERS == 'always') && secrets.SSH_CERT || '' }}
+
+      - name: install test and publication tools
+        if: ${{ inputs.omniroute-smoke || inputs.push-to-cache }}
+        env:
+          RUN_SMOKE: ${{ inputs.omniroute-smoke }}
+          PUSH_CACHE: ${{ inputs.push-to-cache }}
+        run: |
+          set -euo pipefail
+          packages=(jq python3)
+          if [[ "$RUN_SMOKE" == true ]]; then packages+=(nodejs bash coreutils curl openssl); fi
+          if [[ "$PUSH_CACHE" == true ]]; then packages+=(attic-client); fi
+          nix profile add "${packages[@]/#/.#}" --builders ''
+
+      - name: nix build
+        run: nix build --keep-going -L --json ${{ inputs.packages }} > build-result.json
+        if: ${{ inputs.packages != '' }}
+
+      - name: failed build resource diagnostics
+        if: ${{ failure() && runner.os == 'Linux' }}
+        run: |
+          free -h
+          df -h /nix
+          sudo dmesg --ctime | tail -n 120
+
+      - name: packaged OmniRoute smoke test
+        if: ${{ inputs.packages != '' && inputs.omniroute-smoke }}
+        timeout-minutes: 5
+        run: node .github/actions/build-fixtures/omniroute-smoke.js
+
+      - name: publish successful outputs
+        if: ${{ inputs.packages != '' && inputs.push-to-cache }}
+        env:
+          ATTIC_SERVER: ${{ vars.ATTIC_SERVER }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${ATTIC_SERVER:?missing Attic endpoint}" "${ATTIC_CACHE:?missing Attic cache}" "${ATTIC_TOKEN:?missing Attic token}"
+          jq -er '[.[].outputs[]] | unique | select(length > 0) | .[]' build-result.json > build-paths
+          config=$(mktemp -d)
+          trap 'rm -rf "$config"' EXIT
+          export XDG_CONFIG_HOME="$config"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          directory = Path(os.environ["XDG_CONFIG_HOME"]) / "attic"
+          directory.mkdir(mode=0o700)
+          path = directory / "config.toml"
+          with open(path, "x", opener=lambda p, flags: os.open(p, flags, 0o600)) as stream:
+              stream.write('default-server = "worker"\n[servers.worker]\n')
+              stream.write("endpoint = " + json.dumps(os.environ["ATTIC_SERVER"]) + "\n")
+              stream.write("token = " + json.dumps(os.environ["ATTIC_TOKEN"]) + "\n")
+          PY
+          nix shell .#attic-client -c attic push --ignore-upstream-cache-filter --stdin "$ATTIC_CACHE" < build-paths
+          printf 'Published outputs:\n' >> "$GITHUB_STEP_SUMMARY"
+          cat build-paths >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload build evidence
+        if: ${{ always() && inputs.packages != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-result-${{ matrix.system }}
+          path: |
+            build-result.json
+            build-paths
+          if-no-files-found: warn
+
+      - name: set GITHUB_TOKEN
+        if: ${{ inputs.upterm }}
+        run: echo "GITHUB_TOKEN=${GITHUB_TOKEN}" >> "$GITHUB_ENV"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: start upterm session
+        if: ${{ inputs.upterm }}
+        uses: owenthereal/action-upterm@v1
+        with:
+          limit-access-to-actor: true
