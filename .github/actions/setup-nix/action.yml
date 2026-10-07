@@ -1,17 +1,24 @@
 name: setup-nix
+description: Install and configure Nix for the selected native system
 
 inputs:
   system:
+    description: Native Nix system to configure
     required: true
   sandbox:
+    description: Nix sandbox mode
     default: "true"
   extra-nix-config:
+    description: Additional operator-provided Nix configuration
     default: ""
   builders:
+    description: Optional remote builder declarations
     default: ""
   ssh-key:
+    description: Optional private key for the declared remote builders
     default: ""
   ssh-cert:
+    description: Optional SSH certificate for the declared remote builders
     default: ""
 
 runs:

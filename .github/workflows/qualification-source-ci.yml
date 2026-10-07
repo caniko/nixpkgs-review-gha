@@ -41,10 +41,14 @@ jobs:
         if: failure()
         run: |
           set -uo pipefail
+          proposal="$RUNNER_TEMP/format-proposal"
+          mkdir -p "$proposal"
+          git archive HEAD | tar -x -C "$proposal"
           set +e
-          nix fmt -- --no-cache 2>&1 | tee "$RUNNER_TEMP/qualification/format-proposal.log"
+          nix fmt -- --no-cache --walk filesystem -C "$proposal" -vv 2>&1 | tee "$RUNNER_TEMP/qualification/format-proposal.log"
           status=$?
           set -e
+          cp -R "$proposal"/. .
           git diff --binary > "$RUNNER_TEMP/qualification/format-proposal.patch"
           exit "$status"
       - name: Bind retained original source-CI outcome
