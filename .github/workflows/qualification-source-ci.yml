@@ -32,12 +32,21 @@ jobs:
         run: |
           set -euo pipefail
           nix run .#actionlint -- -color 2>&1 | tee "$RUNNER_TEMP/qualification/actionlint.log"
+      - name: Check formatting independently of workflow syntax
+        if: always()
+        run: |
+          set -euo pipefail
           nix build .#checks.x86_64-linux.fmt --no-link --no-update-lock-file 2>&1 | tee "$RUNNER_TEMP/qualification/format.log"
       - name: Retain a hosted formatting proposal after a failed source check
         if: failure()
         run: |
-          nix fmt
+          set -uo pipefail
+          set +e
+          nix fmt -- --no-cache 2>&1 | tee "$RUNNER_TEMP/qualification/format-proposal.log"
+          status=$?
+          set -e
           git diff --binary > "$RUNNER_TEMP/qualification/format-proposal.patch"
+          exit "$status"
       - name: Bind retained original source-CI outcome
         if: always()
         run: python3 qualification-evidence.py seal "$RUNNER_TEMP/qualification" '${{ job.status }}'
