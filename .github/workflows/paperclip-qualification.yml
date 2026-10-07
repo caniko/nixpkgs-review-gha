@@ -1,0 +1,205 @@
+name: Paperclip exact-source native qualification
+on:
+  workflow_call:
+    inputs:
+      head:
+        type: string
+        required: true
+      parent:
+        type: string
+        required: true
+      source-review-sha256:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: paperclip-native-${{ inputs.head }}-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  readiness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      x86: ${{ steps.x86.outputs.label }}
+      arm: ${{ steps.arm.outputs.label }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require explicit source selection and execution scope
+        env:
+          HEAD: ${{ inputs.head }}
+          PARENT: ${{ inputs.parent }}
+          REVIEW: ${{ inputs.source-review-sha256 }}
+        run: |
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_RETENTION_DAYS" -ge 31
+          python3 - <<'PY'
+          import importlib.util, os
+          spec = importlib.util.spec_from_file_location('evidence', 'paperclip-evidence.py')
+          evidence = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(evidence)
+          evidence.source_identity(os.environ['HEAD'], os.environ['PARENT'], os.environ['REVIEW'])
+          PY
+      - id: x86
+        env:
+          GH_TOKEN: ${{ secrets.HOSTED_RUNNER_READ_TOKEN || github.token }}
+          QUALIFICATION_LARGER_RUNNER: ${{ vars.QUALIFICATION_X86_LARGER_RUNNER }}
+        run: python3 runner-readiness.py --memory-gb 64 --destination readiness-x86.json
+      - id: arm
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.HOSTED_RUNNER_READ_TOKEN || github.token }}
+          QUALIFICATION_LARGER_RUNNER: ${{ vars.QUALIFICATION_ARM_LARGER_RUNNER }}
+        run: python3 runner-readiness.py --memory-gb 64 --destination readiness-arm.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paperclip-native-proof-readiness
+          path: readiness-*.json
+          retention-days: 31
+          if-no-files-found: error
+
+  native:
+    needs: readiness
+    runs-on: ${{ matrix.system == 'aarch64-linux' && needs.readiness.outputs.arm || needs.readiness.outputs.x86 }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        system: [x86_64-linux, aarch64-linux]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SYSTEM: ${{ matrix.system }}
+      SOURCE_HEAD: ${{ inputs.head }}
+      SOURCE_PARENT: ${{ inputs.parent }}
+      SOURCE_REVIEW_SHA256: ${{ inputs.source-review-sha256 }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: NixOS/nixpkgs
+          ref: ${{ inputs.head }}
+          path: nixpkgs
+          persist-credentials: false
+      - name: Bind exact signed source, native architecture, and hosted KVM
+        run: |
+          evidence="$RUNNER_TEMP/paperclip-native"
+          mkdir -p "$evidence"
+          echo "EVIDENCE=$evidence" >> "$GITHUB_ENV"
+          python3 paperclip-evidence.py initialize "$evidence"
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)-linux" = "$SYSTEM"
+          awk '/MemTotal/ {exit !($2 >= 64*1024*1024)}' /proc/meminfo
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            sandbox = true
+            system = ${{ matrix.system }}
+            builders =
+            max-jobs = 1
+            cores = 2
+      - name: Build the exact package and unchanged full P2 VM once
+        run: |
+          set -euo pipefail
+          exec 3> >(tee "$EVIDENCE/build.log" >&2)
+          log_pid=$!
+          status=0
+          nix build --file ./nixpkgs paperclip nixosTests.paperclip --no-link --builders '' --max-jobs 1 --cores 2 --json -L 2>&3 | tee "$EVIDENCE/result.json" || status=$?
+          exec 3>&-
+          wait "$log_pid"
+          printf '%s\n' "$status" > "$EVIDENCE/exit-status.txt"
+          test "$status" = 0
+          mapfile -t derivations < <(jq -r '.[].drvPath' "$EVIDENCE/result.json")
+          mapfile -t outputs < <(jq -r '.[].outputs[]' "$EVIDENCE/result.json")
+          nix derivation show --recursive "${derivations[@]}" > "$EVIDENCE/derivations.json"
+          nix path-info --recursive --json "${outputs[@]}" > "$EVIDENCE/closure.json"
+      - name: Push and read back native cache outputs through supported controls
+        env:
+          CACHE_NAME: ${{ vars.CACHIX_CACHE }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_SIGNING_KEY: ${{ secrets.CACHIX_SIGNING_KEY }}
+          ATTIC_SERVER: ${{ vars.ATTIC_SERVER }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          mapfile -t outputs < <(jq -r '.[].outputs[]' "$EVIDENCE/result.json")
+          if [ -n "$ATTIC_SERVER" ] && [ -n "$ATTIC_CACHE" ]; then
+            test -n "$ATTIC_TOKEN"
+            nix profile add .#attic-client --builders ''
+            attic login default "$ATTIC_SERVER" "$ATTIC_TOKEN"
+            attic push "$ATTIC_CACHE" "${outputs[@]}"
+            curl -fsS -H "Authorization: Bearer $ATTIC_TOKEN" "${ATTIC_SERVER%/}/_api/v1/cache-config/$ATTIC_CACHE" > "$EVIDENCE/cache-config.json"
+            endpoint="$(jq -r .substituter_endpoint "$EVIDENCE/cache-config.json")"
+            key="$(jq -r .public_key "$EVIDENCE/cache-config.json")"
+          else
+            test -n "$CACHE_NAME"
+            test -n "$CACHIX_AUTH_TOKEN"
+            nix profile add .#cachix --builders ''
+            cachix push "$CACHE_NAME" "${outputs[@]}"
+            curl -fsS -H "Authorization: Bearer $CACHIX_AUTH_TOKEN" "https://app.cachix.org/api/v1/cache/$CACHE_NAME" > "$EVIDENCE/cache-config.json"
+            endpoint="$(jq -r .uri "$EVIDENCE/cache-config.json")"
+            key="$(jq -r '.publicSigningKeys | join(" ")' "$EVIDENCE/cache-config.json")"
+          fi
+          test -n "$endpoint" && test -n "$key"
+          nix path-info --json --store "$endpoint" "${outputs[@]}" > "$EVIDENCE/cache-readback.json"
+          nix store verify --store "$endpoint" --sigs-needed 1 --option trusted-public-keys "$key" "${outputs[@]}" 2>&1 | tee "$EVIDENCE/cache-verify.log"
+      - name: Seal retained original outcome
+        if: always()
+        run: python3 paperclip-evidence.py seal "$EVIDENCE" '${{ job.status }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paperclip-native-proof-${{ matrix.system }}
+          path: ${{ runner.temp }}/paperclip-native/
+          retention-days: 31
+          if-no-files-found: error
+
+  retention:
+    needs: [readiness, native]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: python3 paperclip-evidence.py audit retention.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        id: audit
+        with:
+          name: paperclip-native-retention
+          path: retention.json
+          retention-days: 31
+          if-no-files-found: error
+      - name: Require native GREEN and read actual audit-artifact lifetime
+        env:
+          ARTIFACT_ID: ${{ steps.audit.outputs.artifact-id }}
+        run: |
+          test '${{ needs.readiness.result }}' = success
+          test '${{ needs.native.result }}' = success
+          python3 - <<'PY'
+          import datetime as dt, json, os, urllib.request
+          url = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/artifacts/' + os.environ['ARTIFACT_ID']
+          request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          with urllib.request.urlopen(request, timeout=30) as response: artifact = json.load(response)
+          lifetime = (dt.datetime.fromisoformat(artifact['expires_at'].replace('Z', '+00:00')) - dt.datetime.fromisoformat(artifact['created_at'].replace('Z', '+00:00'))).total_seconds()
+          assert not artifact['expired'] and lifetime >= 2592000
+          assert artifact['digest'].startswith('sha256:')
+          PY

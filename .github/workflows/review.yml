@@ -13,6 +13,20 @@ on:
         description: "Pull Request Number"
         required: true
         type: string
+      paperclip-qualification:
+        description: "Exact-source Paperclip package/full-P2 native qualification; no merge or approval"
+        type: boolean
+        default: false
+      expected-head:
+        description: "Separately reviewed signed ARM successor head"
+        type: string
+      expected-parent:
+        description: "Required P2 source parent"
+        type: string
+        default: "921ffc6b6ef3e56a58751007ad1c7dfa598f2e1b"
+      source-review-sha256:
+        description: "Accepted signed-head/current-parent review receipt SHA-256"
+        type: string
       x86_64-linux:
         description: "Run on x86_64-linux"
         required: true
@@ -74,7 +88,19 @@ on:
           - merge
 
 jobs:
+  paperclip-qualification:
+    if: inputs.paperclip-qualification
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/paperclip-qualification.yml
+    with:
+      head: ${{ inputs.expected-head }}
+      parent: ${{ inputs.expected-parent }}
+      source-review-sha256: ${{ inputs.source-review-sha256 }}
+    secrets: inherit
   prepare:
+    if: ${{ !inputs.paperclip-qualification }}
     runs-on: ubuntu-latest
     outputs:
       pr: ${{ steps.pr.outputs.pr }}

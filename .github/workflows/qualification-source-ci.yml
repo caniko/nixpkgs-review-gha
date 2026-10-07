@@ -1,0 +1,72 @@
+name: Qualification workflow source CI
+on:
+  pull_request:
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+concurrency:
+  group: qualification-source-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind exact workflow source
+        run: |
+          mkdir -p "$RUNNER_TEMP/qualification"
+          python3 qualification-evidence.py initialize "$RUNNER_TEMP/qualification"
+      - name: Run receipt behavior tests once
+        run: |
+          set -euo pipefail
+          python3 test-paperclip-evidence.py 2>&1 | tee "$RUNNER_TEMP/qualification/tests.log"
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
+      - name: Check workflow syntax against the declared pinned toolchain
+        run: |
+          set -euo pipefail
+          nix run .#actionlint -- -color 2>&1 | tee "$RUNNER_TEMP/qualification/actionlint.log"
+          nix build .#checks.x86_64-linux.fmt --no-link --no-update-lock-file 2>&1 | tee "$RUNNER_TEMP/qualification/format.log"
+      - name: Retain a hosted formatting proposal after a failed source check
+        if: failure()
+        run: |
+          nix fmt
+          git diff --binary > "$RUNNER_TEMP/qualification/format-proposal.patch"
+      - name: Bind retained original source-CI outcome
+        if: always()
+        run: python3 qualification-evidence.py seal "$RUNNER_TEMP/qualification" '${{ job.status }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: workflow-proof-source-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/qualification/
+          retention-days: 31
+          if-no-files-found: error
+  retention:
+    needs: source
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: python3 qualification-evidence.py artifacts workflow-proof- 1 retention.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workflow-retention-${{ github.event.pull_request.head.sha }}
+          path: retention.json
+          retention-days: 31
+          if-no-files-found: error
+      - run: |
+          test '${{ needs.source.result }}' = success
+          python3 qualification-evidence.py artifacts workflow-retention- 1 retention-audit.json

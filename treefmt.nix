@@ -29,4 +29,9 @@
       "--arrow-parens=avoid"
     ];
   };
+  formatter.python = {
+    command = lib.getExe pkgs.ruff;
+    includes = [ "*.py" ];
+    options = [ "format" ];
+  };
 }
