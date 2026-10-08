@@ -41,6 +41,42 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def controller_identity():
+    require(
+        os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+        and os.environ["GITHUB_REF"] == "refs/heads/main",
+        "Qualification requires the reviewed default-branch controller",
+    )
+    repository = os.environ["GITHUB_REPOSITORY"]
+    require(
+        api(f"repos/{repository}/git/ref/heads/main")["object"]["sha"]
+        == os.environ["GITHUB_SHA"],
+        "Default-branch controller advanced; qualify the current reviewed source",
+    )
+
+
+def dispatch_identity(head, review):
+    controller_identity()
+    require(int(os.environ["GITHUB_RUN_ATTEMPT"]) == 1, "Retry evidence cannot qualify")
+    repository = os.environ["GITHUB_REPOSITORY"]
+    current = api(f"repos/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+    title = f"paperclip-native:{head}:{review}"
+    require(current["display_title"] == title, "Dispatch source/review identity mismatch")
+    for page in range(1, 101):
+        runs = api(
+            f"repos/{repository}/actions/workflows/{current['workflow_id']}/runs?event=workflow_dispatch&per_page=100&page={page}"
+        )["workflow_runs"]
+        for run in runs:
+            require(
+                run["display_title"] != title
+                or run["run_number"] >= current["run_number"],
+                f"Source/review already has a previous dispatch: {run['id']}",
+            )
+        if len(runs) < 100:
+            return
+    raise RuntimeError("Dispatch history exceeds the bounded admission scan")
+
+
 def source_identity(head, parent, review):
     require(
         re.fullmatch(r"[0-9a-f]{40}", head) and head != parent,
@@ -98,6 +134,7 @@ def source_identity(head, parent, review):
 
 
 def initialize(directory):
+    controller_identity()
     require(
         os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch",
         "Heavy qualification requires an explicit hosted dispatch",
@@ -279,10 +316,18 @@ def audit(destination):
         "workflow_sha": os.environ.get("GITHUB_SHA"),
         "repository": os.environ.get("GITHUB_REPOSITORY"),
         "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "source_head": os.environ.get("SOURCE_HEAD", ""),
+        "source_parent": os.environ.get("SOURCE_PARENT", ""),
+        "signed_review_sha256": os.environ.get("SOURCE_REVIEW_SHA256", ""),
         "artifacts": [],
     }
     try:
         validate_retention(receipt["artifacts"])
+        source_identity(
+            receipt["source_head"],
+            receipt["source_parent"],
+            receipt["signed_review_sha256"],
+        )
     except Exception as error:
         receipt.update(outcome="failure", rejected=[str(error)])
         Path(destination).write_text(json.dumps(receipt, indent=2) + "\n")

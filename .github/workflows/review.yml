@@ -1,5 +1,5 @@
 name: review
-run-name: "review #${{ inputs.pr }}${{ inputs.extra-args && format(' ({0})', inputs.extra-args) || '' }}"
+run-name: "${{ inputs.paperclip-qualification && format('paperclip-native:{0}:{1}', inputs.expected-head, inputs.source-review-sha256) || format('review #{0}{1}', inputs.pr, inputs.extra-args && format(' ({0})', inputs.extra-args) || '') }}"
 
 permissions: {}
 

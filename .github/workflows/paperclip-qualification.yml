@@ -15,7 +15,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: paperclip-native-${{ inputs.head }}-${{ github.run_id }}
+  group: paperclip-native-${{ inputs.head }}-${{ inputs.source-review-sha256 }}
   cancel-in-progress: false
 jobs:
   readiness:
@@ -44,6 +44,7 @@ jobs:
           spec = importlib.util.spec_from_file_location('evidence', 'paperclip-evidence.py')
           evidence = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(evidence)
+          evidence.dispatch_identity(os.environ['HEAD'], os.environ['REVIEW'])
           evidence.source_identity(os.environ['HEAD'], os.environ['PARENT'], os.environ['REVIEW'])
           PY
       - id: x86
@@ -198,6 +199,9 @@ jobs:
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
+      SOURCE_HEAD: ${{ inputs.head }}
+      SOURCE_PARENT: ${{ inputs.parent }}
+      SOURCE_REVIEW_SHA256: ${{ inputs.source-review-sha256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

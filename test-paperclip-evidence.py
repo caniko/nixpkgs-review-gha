@@ -190,6 +190,106 @@ class SourceBindingTests(unittest.TestCase):
         self.assertEqual(receipt["outcome"], "failure")
         self.assertIn("Native cache content", receipt["rejected"][0])
 
+    def test_final_retention_rechecks_selected_head_and_retains_rejection(self):
+        env = {
+            "SOURCE_HEAD": "a" * 40,
+            "SOURCE_PARENT": evidence.PARENT,
+            "SOURCE_REVIEW_SHA256": self.review,
+        }
+        for kind in ["current", "advanced", "merged"]:
+            records = self.records()
+            if kind == "advanced":
+                records[0]["head"]["sha"] = "c" * 40
+            if kind == "merged":
+                records[0]["merged"] = True
+            with (
+                self.subTest(kind=kind),
+                patch.dict(os.environ, env),
+                patch.object(evidence, "api", side_effect=records),
+                patch.object(evidence, "validate_retention"),
+            ):
+                destination = self.directory / "retention.json"
+                if kind == "current":
+                    evidence.audit(destination)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "head advanced or merged"):
+                        evidence.audit(destination)
+                receipt = json.loads(destination.read_text())
+                self.assertEqual(receipt["source_head"], env["SOURCE_HEAD"])
+                self.assertEqual(
+                    receipt["outcome"], "success" if kind == "current" else "failure"
+                )
+
+
+class DispatchAdmissionTests(unittest.TestCase):
+    def setUp(self):
+        self.env = {
+            "GITHUB_REPOSITORY": "org/controller",
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_RUN_ID": "12",
+            "GITHUB_RUN_ATTEMPT": "1",
+        }
+
+    def test_controller_rejects_branch_dispatch_and_stale_default_sha(self):
+        for ref, sha in [
+            ("refs/heads/topic", "a" * 40),
+            ("refs/heads/main", "b" * 40),
+        ]:
+            with (
+                self.subTest(ref=ref, sha=sha),
+                patch.dict(os.environ, {**self.env, "GITHUB_REF": ref}),
+                patch.object(
+                    evidence, "api", return_value={"object": {"sha": sha}}
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    evidence.controller_identity()
+        with (
+            patch.dict(os.environ, self.env),
+            patch.object(evidence, "api", return_value={"object": {"sha": "a" * 40}}),
+        ):
+            evidence.controller_identity()
+
+    def test_repeat_dispatch_rejects_prior_attempts_across_pages_and_outcomes(self):
+        title = "paperclip-native:" + "b" * 40 + ":" + "c" * 64
+        current = {
+            "id": 12,
+            "workflow_id": 7,
+            "run_number": 10,
+            "display_title": title,
+        }
+        for outcome in ["success", "failure", "cancelled", None]:
+            prior = {**current, "id": 11, "run_number": 9, "conclusion": outcome}
+            unrelated = [{**prior, "display_title": "unrelated"} for _ in range(100)]
+            with (
+                self.subTest(outcome=outcome),
+                patch.dict(os.environ, self.env),
+                patch.object(evidence, "controller_identity"),
+                patch.object(
+                    evidence,
+                    "api",
+                    side_effect=[
+                        current,
+                        {"workflow_runs": unrelated},
+                        {"workflow_runs": [prior]},
+                    ],
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "previous dispatch"):
+                    evidence.dispatch_identity("b" * 40, "c" * 64)
+        with (
+            patch.dict(os.environ, self.env),
+            patch.object(evidence, "controller_identity"),
+            patch.object(
+                evidence,
+                "api",
+                side_effect=[current, {"workflow_runs": [current]}],
+            ),
+        ):
+            evidence.dispatch_identity("b" * 40, "c" * 64)
+
 
 class RunnerReadinessTests(unittest.TestCase):
     def test_documented_machine_size_and_repository_access(self):
@@ -331,6 +431,7 @@ class RetentionFailureTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.dict(os.environ, env),
+            patch.object(evidence, "source_identity", return_value={}),
             patch.object(
                 evidence, "api",
                 side_effect=[
