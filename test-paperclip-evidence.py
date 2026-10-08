@@ -311,7 +311,9 @@ class DispatchAdmissionTests(unittest.TestCase):
             # GitHub caps filtered run searches at 1,000 records.
             return {
                 "workflow_runs": (
-                    [] if "event=" in path else [{**current, "id": 11, "run_number": 999}]
+                    []
+                    if "event=" in path
+                    else [{**current, "id": 11, "run_number": 999}]
                 )
             }
 
