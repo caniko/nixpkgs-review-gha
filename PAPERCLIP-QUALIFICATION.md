@@ -26,12 +26,17 @@ Set `QUALIFICATION_X86_LARGER_RUNNER` and `QUALIFICATION_ARM_LARGER_RUNNER` to
 supported organization-owned hosted runner names with at least 64 GiB.
 `HOSTED_RUNNER_READ_TOKEN` supplies supported organization runner-read access.
 Readiness validates provider allocation and repository access before scheduling.
-The native job checks the actual architecture and KVM; no emulation, denied-call
+The native job checks at least 60 GiB of usable `MemTotal`, allowing kernel
+reservations on the provider's required 64-GiB allocation, plus actual architecture
+and KVM; no emulation, denied-call
 wrapper, outer evaluation flock, capacity override, or unsupported-system bypass
 is supplied. The personal-account fork currently lacks larger-runner readiness.
 
-The package and full P2 VM run once on attempt one, with substitution disabled,
-the existing assertions, and deadlines. Results bind source members, workflow
+The package and full P2 VM run once on attempt one, preserving existing assertions
+and deadlines. Each exact derivation's dependencies are realized with substitution
+enabled, then its still-missing selected outputs execute locally with substitution
+disabled. The package runs first so VM dependencies use its native output. No root
+derivation override changes the production identity. Results bind source members, workflow
 source, derivations, native
 store closure, build logs, signed cache verification, and cache NAR hashes.
 Attic and Cachix retain their supported owner-controlled cache transports and

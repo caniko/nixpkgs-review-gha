@@ -99,7 +99,8 @@ jobs:
           python3 paperclip-evidence.py initialize "$evidence"
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(uname -m)-linux" = "$SYSTEM"
-          awk '/MemTotal/ {exit !($2 >= 64*1024*1024)}' /proc/meminfo
+          # Provider readiness requires 64 GiB; usable RAM excludes kernel reserves.
+          awk '/MemTotal/ {exit !($2 >= 60*1024*1024)}' /proc/meminfo
           test -c /dev/kvm
           sudo chmod a+rw /dev/kvm
           test -r /dev/kvm && test -w /dev/kvm
@@ -118,11 +119,30 @@ jobs:
           exec 3> >(tee "$EVIDENCE/build.log" >&2)
           log_pid=$!
           status=0
-          nix build --file ./nixpkgs paperclip nixosTests.paperclip --no-substitute --no-link --builders '' --max-jobs 1 --cores 2 --json -L 2>&3 | tee "$EVIDENCE/result.json" || status=$?
+          # Build the package first, so VM dependencies use its native output.
+          for target in paperclip nixosTests.paperclip; do
+            drv=$(nix-instantiate ./nixpkgs -A "$target" --add-root "$EVIDENCE/$target.drv" --indirect 2>&3)
+            nix-store --query --references "$drv" > "$EVIDENCE/$target.dependencies"
+            mapfile -t dependencies < "$EVIDENCE/$target.dependencies"
+            nix-store --realise "${dependencies[@]}" --option substitute true --builders '' --max-jobs 1 --cores 2 2>&3 > "$EVIDENCE/$target.dependency-outputs"
+            # No selected output may have been substituted during dependency setup.
+            nix-store --query --outputs "$drv" > "$EVIDENCE/$target.outputs"
+            while IFS= read -r output; do
+              if nix-store --check-validity "$output" 2>/dev/null; then
+                echo "Selected output already exists before native execution: $output" >&3
+                status=1
+                break
+              fi
+            done < "$EVIDENCE/$target.outputs"
+            if [ "$status" != 0 ]; then break; fi
+            nix build "$drv^*" --no-substitute --no-link --builders '' --max-jobs 1 --cores 2 --json -L 2>&3 > "$EVIDENCE/$target.result.json" || status=$?
+            if [ "$status" != 0 ]; then break; fi
+          done
           exec 3>&-
           wait "$log_pid"
           printf '%s\n' "$status" > "$EVIDENCE/exit-status.txt"
           test "$status" = 0
+          jq -s 'add' "$EVIDENCE/paperclip.result.json" "$EVIDENCE/nixosTests.paperclip.result.json" > "$EVIDENCE/result.json"
           mapfile -t derivations < <(jq -r '.[].drvPath' "$EVIDENCE/result.json")
           mapfile -t outputs < <(jq -r '.[].outputs[]' "$EVIDENCE/result.json")
           nix derivation show --recursive "${derivations[@]}" > "$EVIDENCE/derivations.json"
