@@ -61,7 +61,9 @@ def dispatch_identity(head, review):
     repository = os.environ["GITHUB_REPOSITORY"]
     current = api(f"repos/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
     title = f"paperclip-native:{head}:{review}"
-    require(current["display_title"] == title, "Dispatch source/review identity mismatch")
+    require(
+        current["display_title"] == title, "Dispatch source/review identity mismatch"
+    )
     for page in range(1, 101):
         runs = api(
             f"repos/{repository}/actions/workflows/{current['workflow_id']}/runs?event=workflow_dispatch&per_page=100&page={page}"

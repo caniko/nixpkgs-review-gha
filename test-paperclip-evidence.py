@@ -212,7 +212,9 @@ class SourceBindingTests(unittest.TestCase):
                 if kind == "current":
                     evidence.audit(destination)
                 else:
-                    with self.assertRaisesRegex(RuntimeError, "head advanced or merged"):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "head advanced or merged"
+                    ):
                         evidence.audit(destination)
                 receipt = json.loads(destination.read_text())
                 self.assertEqual(receipt["source_head"], env["SOURCE_HEAD"])
@@ -240,9 +242,7 @@ class DispatchAdmissionTests(unittest.TestCase):
             with (
                 self.subTest(ref=ref, sha=sha),
                 patch.dict(os.environ, {**self.env, "GITHUB_REF": ref}),
-                patch.object(
-                    evidence, "api", return_value={"object": {"sha": sha}}
-                ),
+                patch.object(evidence, "api", return_value={"object": {"sha": sha}}),
             ):
                 with self.assertRaises(RuntimeError):
                     evidence.controller_identity()
@@ -383,7 +383,8 @@ class RetentionFailureTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as temporary,
                 patch.dict(os.environ, env),
                 patch.object(
-                    evidence, "api",
+                    evidence,
+                    "api",
                     side_effect=[{"head_sha": head}, {"artifacts": artifacts}],
                 ),
             ):
@@ -408,9 +409,7 @@ class RetentionFailureTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.dict(os.environ, env),
-            patch.object(
-                evidence, "api", side_effect=RuntimeError("API unavailable")
-            ),
+            patch.object(evidence, "api", side_effect=RuntimeError("API unavailable")),
         ):
             destination = Path(temporary) / "retention.json"
             with self.assertRaisesRegex(RuntimeError, "API unavailable"):
@@ -433,7 +432,8 @@ class RetentionFailureTests(unittest.TestCase):
             patch.dict(os.environ, env),
             patch.object(evidence, "source_identity", return_value={}),
             patch.object(
-                evidence, "api",
+                evidence,
+                "api",
                 side_effect=[
                     {"head_sha": env["GITHUB_SHA"]},
                     {"artifacts": self.native_artifacts()},
