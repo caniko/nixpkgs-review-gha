@@ -275,9 +275,9 @@ class RetentionFailureTests(unittest.TestCase):
             if kind == "missing":
                 artifacts.pop()
             if kind == "lifetime":
-                artifacts[0]["expires_at"] = "2026-10-09T00:00:00Z"
+                artifacts[2]["expires_at"] = "2026-10-09T00:00:00Z"
             if kind == "digest":
-                artifacts[0]["digest"] = ""
+                artifacts[2]["digest"] = ""
             with (
                 self.subTest(kind=kind),
                 tempfile.TemporaryDirectory() as temporary,
@@ -296,6 +296,31 @@ class RetentionFailureTests(unittest.TestCase):
                 self.assertTrue(receipt["rejected"])
                 self.assertEqual(receipt["workflow_sha"], env["GITHUB_SHA"])
                 self.assertFalse(receipt["qualified"])
+                if kind != "source":
+                    self.assertEqual(len(receipt["artifacts"]), 2)
+
+    def test_native_audit_api_failure_retains_run_identity(self):
+        env = {
+            "GITHUB_REPOSITORY": "org/controller",
+            "GITHUB_RUN_ID": "12",
+            "GITHUB_SHA": "a" * 40,
+        }
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, env),
+            patch.object(
+                evidence, "api", side_effect=RuntimeError("API unavailable")
+            ),
+        ):
+            destination = Path(temporary) / "retention.json"
+            with self.assertRaisesRegex(RuntimeError, "API unavailable"):
+                evidence.audit(destination)
+            receipt = json.loads(destination.read_text())
+            self.assertEqual(receipt["repository"], env["GITHUB_REPOSITORY"])
+            self.assertEqual(receipt["run_id"], env["GITHUB_RUN_ID"])
+            self.assertEqual(receipt["outcome"], "failure")
+            self.assertEqual(receipt["rejected"], ["API unavailable"])
+            self.assertFalse(receipt["qualified"])
 
     def test_native_audit_keeps_all_three_valid_artifacts(self):
         env = {
@@ -318,6 +343,8 @@ class RetentionFailureTests(unittest.TestCase):
             evidence.audit(destination)
             receipt = json.loads(destination.read_text())
             self.assertEqual(len(receipt["artifacts"]), 3)
+            self.assertEqual(receipt["outcome"], "success")
+            self.assertEqual(receipt["rejected"], [])
             self.assertFalse(receipt["qualified"])
 
     def test_rejected_retention_audit_keeps_its_failure_payload(self):

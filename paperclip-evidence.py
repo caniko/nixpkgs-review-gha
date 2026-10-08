@@ -225,7 +225,7 @@ def seal(directory, outcome):
     require(not rejected, "; ".join(rejected))
 
 
-def audit(destination):
+def validate_retention(retained):
     repository = os.environ["GITHUB_REPOSITORY"]
     require(
         api(f"repos/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}")[
@@ -234,7 +234,6 @@ def audit(destination):
         == os.environ["GITHUB_SHA"],
         "Workflow source identity changed",
     )
-    retained = []
     for page in range(1, 20):
         artifacts = api(
             f"repos/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}/artifacts?per_page=100&page={page}"
@@ -271,18 +270,25 @@ def audit(destination):
         len(retained) == 3,
         "Readiness and both native architectures must retain evidence",
     )
-    Path(destination).write_text(
-        json.dumps(
-            {
-                "schema": "paperclip-native-retention.v1",
-                "qualified": False,
-                "workflow_sha": os.environ["GITHUB_SHA"],
-                "artifacts": retained,
-            },
-            indent=2,
-        )
-        + "\n"
-    )
+
+
+def audit(destination):
+    receipt = {
+        "schema": "paperclip-native-retention.v1",
+        "qualified": False,
+        "workflow_sha": os.environ.get("GITHUB_SHA"),
+        "repository": os.environ.get("GITHUB_REPOSITORY"),
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "artifacts": [],
+    }
+    try:
+        validate_retention(receipt["artifacts"])
+    except Exception as error:
+        receipt.update(outcome="failure", rejected=[str(error)])
+        Path(destination).write_text(json.dumps(receipt, indent=2) + "\n")
+        raise
+    receipt.update(outcome="success", rejected=[])
+    Path(destination).write_text(json.dumps(receipt, indent=2) + "\n")
 
 
 if __name__ == "__main__":
