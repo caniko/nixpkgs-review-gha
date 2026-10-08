@@ -66,7 +66,7 @@ def dispatch_identity(head, review):
     )
     for page in range(1, 101):
         runs = api(
-            f"repos/{repository}/actions/workflows/{current['workflow_id']}/runs?event=workflow_dispatch&per_page=100&page={page}"
+            f"repos/{repository}/actions/workflows/{current['workflow_id']}/runs?per_page=100&page={page}"
         )["workflow_runs"]
         for run in runs:
             require(
@@ -325,6 +325,7 @@ def audit(destination):
     }
     try:
         validate_retention(receipt["artifacts"])
+        controller_identity()
         source_identity(
             receipt["source_head"],
             receipt["source_parent"],

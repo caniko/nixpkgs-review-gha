@@ -205,6 +205,7 @@ class SourceBindingTests(unittest.TestCase):
             with (
                 self.subTest(kind=kind),
                 patch.dict(os.environ, env),
+                patch.object(evidence, "controller_identity"),
                 patch.object(evidence, "api", side_effect=records),
                 patch.object(evidence, "validate_retention"),
             ):
@@ -289,6 +290,38 @@ class DispatchAdmissionTests(unittest.TestCase):
             ),
         ):
             evidence.dispatch_identity("b" * 40, "c" * 64)
+
+    def test_prior_attempt_after_a_thousand_dispatches_is_still_rejected(self):
+        title = "paperclip-native:" + "b" * 40 + ":" + "c" * 64
+        current = {
+            "id": 12,
+            "workflow_id": 7,
+            "run_number": 2000,
+            "display_title": title,
+        }
+
+        def provider(path):
+            if path.endswith("/runs/12"):
+                return current
+            page = int(path.rsplit("page=", 1)[1])
+            if page <= 10:
+                return {
+                    "workflow_runs": [{**current, "display_title": "ordinary"}] * 100
+                }
+            # GitHub caps filtered run searches at 1,000 records.
+            return {
+                "workflow_runs": (
+                    [] if "event=" in path else [{**current, "id": 11, "run_number": 999}]
+                )
+            }
+
+        with (
+            patch.dict(os.environ, self.env),
+            patch.object(evidence, "controller_identity"),
+            patch.object(evidence, "api", side_effect=provider),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "previous dispatch: 11"):
+                evidence.dispatch_identity("b" * 40, "c" * 64)
 
 
 class RunnerReadinessTests(unittest.TestCase):
@@ -430,6 +463,7 @@ class RetentionFailureTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.dict(os.environ, env),
+            patch.object(evidence, "controller_identity"),
             patch.object(evidence, "source_identity", return_value={}),
             patch.object(
                 evidence,
@@ -447,6 +481,62 @@ class RetentionFailureTests(unittest.TestCase):
             self.assertEqual(receipt["outcome"], "success")
             self.assertEqual(receipt["rejected"], [])
             self.assertFalse(receipt["qualified"])
+
+    def test_final_audit_rejects_live_controller_movement(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(evidence, "validate_retention"),
+            patch.object(
+                evidence, "controller_identity", side_effect=RuntimeError("main moved")
+            ),
+        ):
+            destination = Path(temporary) / "retention.json"
+            with self.assertRaisesRegex(RuntimeError, "main moved"):
+                evidence.audit(destination)
+            receipt = json.loads(destination.read_text())
+            self.assertEqual(receipt["outcome"], "failure")
+            self.assertEqual(receipt["rejected"], ["main moved"])
+
+    def test_rejected_source_initialization_still_seals_run_identity(self):
+        for kind in ["missing", "invalid-json", "invalid-type"]:
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary) / "evidence"
+                directory.mkdir()
+                event = Path(temporary) / "event.json"
+                event.write_text(
+                    json.dumps(
+                        {
+                            "pull_request": {
+                                "number": 2,
+                                "head": {"sha": "a" * 40},
+                                "base": {"sha": "b" * 40},
+                            }
+                        }
+                    )
+                )
+                env = {
+                    "GITHUB_REPOSITORY": "org/controller",
+                    "GITHUB_EVENT_PATH": str(event),
+                    "GITHUB_EVENT_NAME": "pull_request",
+                    "GITHUB_WORKFLOW_REF": "org/controller/workflow@refs/pull/2/merge",
+                    "GITHUB_WORKFLOW_SHA": "c" * 40,
+                    "GITHUB_RUN_ID": "12",
+                    "GITHUB_RUN_ATTEMPT": "2",
+                }
+                if kind == "invalid-json":
+                    (directory / "source.json").write_text("{")
+                if kind == "invalid-type":
+                    (directory / "source.json").write_text("[]")
+                with self.subTest(kind=kind), patch.dict(os.environ, env):
+                    with self.assertRaises(Exception):
+                        qualification.seal(directory, "failure", False)
+                receipt = json.loads((directory / "receipt.json").read_text())
+                self.assertEqual(receipt["outcome"], "failure")
+                self.assertEqual(receipt["head"], "a" * 40)
+                self.assertEqual(receipt["run_id"], 12)
+                self.assertEqual(receipt["run_attempt"], 2)
+                self.assertTrue(receipt["rejected"])
+                self.assertFalse(receipt["qualified"])
 
     def test_rejected_retention_audit_keeps_its_failure_payload(self):
         with tempfile.TemporaryDirectory() as temporary:

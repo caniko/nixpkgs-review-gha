@@ -37,32 +37,36 @@ def api(path):
         return json.load(response)
 
 
-def identity():
+def event_identity():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     require(
         os.environ["GITHUB_EVENT_NAME"] == "pull_request",
         "Qualification requires a PR event",
     )
     pr = event["pull_request"]
-    head = pr["head"]["sha"]
-    require(
-        api(f"pulls/{pr['number']}")["head"]["sha"] == head,
-        "PR head advanced; evidence is historical",
-    )
-    require(
-        int(os.environ["GITHUB_RUN_ATTEMPT"]) == 1,
-        "Retries cannot qualify; publish a source successor",
-    )
     return {
         "repository": os.environ["GITHUB_REPOSITORY"],
         "pr": pr["number"],
-        "head": head,
+        "head": pr["head"]["sha"],
         "base": pr["base"]["sha"],
         "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
         "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"],
         "run_id": int(os.environ["GITHUB_RUN_ID"]),
-        "run_attempt": 1,
+        "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
     }
+
+
+def identity():
+    source = event_identity()
+    require(
+        api(f"pulls/{source['pr']}")["head"]["sha"] == source["head"],
+        "PR head advanced; evidence is historical",
+    )
+    require(
+        source["run_attempt"] == 1,
+        "Retries cannot qualify; publish a source successor",
+    )
+    return source
 
 
 def initialize(directory):
@@ -101,9 +105,26 @@ def initialize(directory):
 
 
 def seal(directory, outcome, strict_reports):
-    source = json.loads((directory / "source.json").read_text())
+    directory.mkdir(parents=True, exist_ok=True)
+    source = {
+        "repository": os.environ.get("GITHUB_REPOSITORY"),
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF"),
+        "workflow_sha": os.environ.get("GITHUB_WORKFLOW_SHA"),
+    }
     reports = []
     rejected = []
+    try:
+        document = json.loads((directory / "source.json").read_text())
+        require(isinstance(document, dict), "Source receipt is not an object")
+        source.update(document)
+    except Exception as error:
+        rejected.append(str(error))
+        try:
+            source.update(event_identity())
+        except Exception as identity_error:
+            rejected.append(str(identity_error))
     for path in sorted(directory.rglob("*.xml")):
         root = ET.parse(path).getroot()
         cases = root.findall(".//testcase")
@@ -138,7 +159,8 @@ def seal(directory, outcome, strict_reports):
     receipt = {
         "schema": "hosted-qualification.v1",
         **source,
-        "outcome": outcome,
+        "outcome": "failure" if rejected else outcome,
+        "original_outcome": outcome,
         "qualified": False,
         "reports": reports,
         "rejected": rejected,
