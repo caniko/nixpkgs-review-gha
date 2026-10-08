@@ -18,7 +18,25 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "simit": "simit"
+      }
+    },
+    "simit": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791443696,
+        "narHash": "sha256-59+Jv3qCZxuc/kasX7lFGw0S+OFwZJouBHeRdoBW75s=",
+        "owner": "caniko",
+        "repo": "simit",
+        "rev": "6b58559e871fa4a169e8be33f1024775858eba81",
+        "type": "github"
+      },
+      "original": {
+        "owner": "caniko",
+        "repo": "simit",
+        "rev": "6b58559e871fa4a169e8be33f1024775858eba81",
+        "type": "github"
       }
     }
   },
