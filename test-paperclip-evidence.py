@@ -381,6 +381,94 @@ class RunnerReadinessTests(unittest.TestCase):
 
 
 class RetentionFailureTests(unittest.TestCase):
+    def test_native_rejected_initialization_keeps_dispatch_identity(self):
+        env = {
+            "GITHUB_REPOSITORY": "org/controller",
+            "GITHUB_SHA": "a" * 40,
+            "GITHUB_WORKFLOW_REF": "org/controller/workflow@refs/heads/main",
+            "GITHUB_RUN_ID": "12",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "SYSTEM": "aarch64-linux",
+            "SOURCE_HEAD": "b" * 40,
+            "SOURCE_PARENT": evidence.PARENT,
+            "SOURCE_REVIEW_SHA256": "c" * 64,
+        }
+        for kind in ["missing", "invalid-json", "invalid-type"]:
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary) / "native"
+                if kind != "missing":
+                    directory.mkdir()
+                    (directory / "source.json").write_text(
+                        "{" if kind == "invalid-json" else "[]"
+                    )
+                with self.subTest(kind=kind), patch.dict(os.environ, env):
+                    with self.assertRaises(Exception):
+                        evidence.seal(directory, "failure")
+                receipt = json.loads((directory / "receipt.json").read_text())
+                self.assertEqual(receipt["workflow_repository"], env["GITHUB_REPOSITORY"])
+                self.assertEqual(receipt["workflow_sha"], env["GITHUB_SHA"])
+                self.assertEqual(receipt["run_id"], env["GITHUB_RUN_ID"])
+                self.assertEqual(receipt["attempt"], env["GITHUB_RUN_ATTEMPT"])
+                self.assertEqual(receipt["system"], env["SYSTEM"])
+                self.assertEqual(receipt["source_head"], env["SOURCE_HEAD"])
+                self.assertEqual(receipt["source_parent"], env["SOURCE_PARENT"])
+                self.assertEqual(
+                    receipt["signed_review_sha256"], env["SOURCE_REVIEW_SHA256"]
+                )
+                self.assertEqual(receipt["outcome"], "failure")
+                self.assertTrue(receipt["rejected"])
+                self.assertFalse(receipt["qualified"])
+
+    def test_final_artifact_readback_rejects_provider_drift_and_keeps_identity(self):
+        source = {"repository": "org/controller", "head": "a" * 40, "run_id": 12}
+        original = {
+            "id": 13,
+            "name": "workflow-retention-audit-" + source["head"],
+            "expired": False,
+            "created_at": "2026-10-08T00:00:00Z",
+            "expires_at": "2026-11-08T00:00:00Z",
+            "digest": "sha256:" + "b" * 64,
+            "workflow_run": {"id": 12, "head_sha": source["head"]},
+        }
+        for kind in ["valid", "expired", "short", "digest", "foreign-run", "foreign-id"]:
+            artifact = {**original, "workflow_run": dict(original["workflow_run"])}
+            if kind == "expired":
+                artifact["expired"] = True
+            if kind == "short":
+                artifact["expires_at"] = "2026-10-09T00:00:00Z"
+            if kind == "digest":
+                artifact["digest"] = "sha256:" + "z" * 64
+            if kind == "foreign-run":
+                artifact["workflow_run"]["id"] = 99
+            if kind == "foreign-id":
+                artifact["id"] = 99
+            with (
+                self.subTest(kind=kind),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(qualification, "identity", return_value=source),
+                patch.object(qualification, "api", return_value=artifact),
+            ):
+                destination = Path(temporary) / "final-retention.json"
+                if kind == "valid":
+                    qualification.artifact(13, destination)
+                else:
+                    with self.assertRaises(RuntimeError):
+                        qualification.artifact(13, destination)
+                receipt = json.loads(destination.read_text())
+                self.assertEqual(receipt["head"], source["head"])
+                self.assertEqual(receipt["run_id"], source["run_id"])
+                self.assertEqual(
+                    receipt["outcome"], "success" if kind == "valid" else "failure"
+                )
+                if kind == "valid":
+                    self.assertEqual(receipt["artifacts"][0]["sha256"], original["digest"])
+                    self.assertGreaterEqual(
+                        receipt["artifacts"][0]["retention_seconds"], 2592000
+                    )
+                else:
+                    self.assertTrue(receipt["rejected"])
+                self.assertFalse(receipt["qualified"])
+
     def native_artifacts(self):
         return [
             {
