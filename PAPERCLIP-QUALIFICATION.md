@@ -21,6 +21,14 @@ publication requires the existing independent review authority. No acceptance
 receipt is supplied by this workflow preparation; missing, changed, unaccepted,
 or foreign-source receipts block scheduling. Native evidence retains the same
 receipt bytes and revalidates the source before sealing success.
+Digest-named review files are explicitly excluded from treefmt; hosted source CI
+checks a nonaccepted fixture's exact bytes through the real treefmt route.
+
+Dispatch-history scanning and the source/review concurrency key provide only
+retained-history duplicate checks. GitHub run deletion or retention expiry can
+remove that history. Heavy dispatch remains held until the operator designates
+an independently protected durable one-time admission authority and its source
+integration is reviewed and qualified. Workflow-run history is not that authority.
 
 Set `QUALIFICATION_X86_LARGER_RUNNER` and `QUALIFICATION_ARM_LARGER_RUNNER` to
 supported organization-owned hosted runner names with at least 64 GiB.
@@ -31,6 +39,9 @@ reservations on the provider's required 64-GiB allocation, plus actual architect
 and KVM; no emulation, denied-call
 wrapper, outer evaluation flock, capacity override, or unsupported-system bypass
 is supplied. The personal-account fork currently lacks larger-runner readiness.
+The current GitHub-hosted ARM Dpdsv6 offering lacks nested virtualization, so a
+64-GiB runner label alone cannot release the KVM gate. A concrete capable native
+execution design still requires operator authorization and separate qualification.
 
 The package and full P2 VM run once on attempt one, preserving existing assertions
 and deadlines. Each exact derivation's dependencies are realized with substitution
@@ -43,6 +54,10 @@ Attic and Cachix retain their supported owner-controlled cache transports and
 configure Nix read credentials through `attic use` or token-backed `cachix use`.
 Every required artifact and its audit require an actual provider lifetime of at
 least 2,592,000 seconds; uploads request 31 days.
+Rejected native initialization also retains dispatch/run/controller/source identity
+and its failure before re-raising. Source CI reads back its last retention-audit
+upload by provider artifact ID and compares run/head, uploaded digest and actual
+lifetime. That final readback is retained in job logs and the job summary.
 
 The native VM covers packaged runner architecture, sharp, embedded PostgreSQL,
 and the full P2 lifecycle. Its assertions and installed ELF/source bindings need

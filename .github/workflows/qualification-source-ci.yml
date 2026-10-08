@@ -37,6 +37,28 @@ jobs:
         run: |
           set -euo pipefail
           nix build .#checks.x86_64-linux.fmt --no-link --no-update-lock-file 2>&1 | tee "$RUNNER_TEMP/qualification/format.log"
+      - name: Verify digest-named review bytes survive treefmt
+        run: |
+          set -euo pipefail
+          formatter=$(nix build .#formatter.x86_64-linux --no-link --no-update-lock-file --print-out-paths)
+          fixture="$RUNNER_TEMP/receipt-format-check"
+          mkdir -p "$fixture/source-reviews/paperclip"
+          cp treefmt.nix "$fixture/treefmt.nix"
+          FIXTURE="$fixture" python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          directory = Path(os.environ['FIXTURE']) / 'source-reviews' / 'paperclip'
+          payload = (json.dumps({'decision': 'not-accepted-test-fixture'}, sort_keys=True) + '\n').encode()
+          (directory / (hashlib.sha256(payload).hexdigest() + '.json')).write_bytes(payload)
+          PY
+          "$formatter/bin/treefmt" -C "$fixture" --ci --no-cache
+          FIXTURE="$fixture" python3 - <<'PY'
+          import hashlib, os
+          from pathlib import Path
+          files = list((Path(os.environ['FIXTURE']) / 'source-reviews' / 'paperclip').glob('*.json'))
+          assert len(files) == 1
+          assert hashlib.sha256(files[0].read_bytes()).hexdigest() == files[0].stem
+          PY
       - name: Retain a hosted formatting proposal after a failed source check
         if: failure()
         run: |
@@ -90,4 +112,10 @@ jobs:
           path: retention-audit.json
           retention-days: 31
           if-no-files-found: error
+        id: final-retention-upload
+      - name: Read back the final retention audit by uploaded artifact ID
+        if: always() && steps.final-retention-upload.outcome == 'success'
+        run: |
+          python3 qualification-evidence.py artifact '${{ steps.final-retention-upload.outputs.artifact-id }}' final-retention.json --sha256 '${{ steps.final-retention-upload.outputs.artifact-digest }}'
+          cat final-retention.json >> "$GITHUB_STEP_SUMMARY"
       - run: test '${{ needs.source.result }}' = success

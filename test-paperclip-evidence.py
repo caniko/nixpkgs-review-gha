@@ -430,7 +430,16 @@ class RetentionFailureTests(unittest.TestCase):
             "digest": "sha256:" + "b" * 64,
             "workflow_run": {"id": 12, "head_sha": source["head"]},
         }
-        for kind in ["valid", "expired", "short", "digest", "foreign-run", "foreign-id"]:
+        for kind in [
+            "valid",
+            "expired",
+            "short",
+            "digest",
+            "foreign-run",
+            "foreign-id",
+            "foreign-name",
+            "uploaded-digest",
+        ]:
             artifact = {**original, "workflow_run": dict(original["workflow_run"])}
             if kind == "expired":
                 artifact["expired"] = True
@@ -442,6 +451,9 @@ class RetentionFailureTests(unittest.TestCase):
                 artifact["workflow_run"]["id"] = 99
             if kind == "foreign-id":
                 artifact["id"] = 99
+            if kind == "foreign-name":
+                artifact["name"] = "unrelated"
+            uploaded_digest = "c" * 64 if kind == "uploaded-digest" else "b" * 64
             with (
                 self.subTest(kind=kind),
                 tempfile.TemporaryDirectory() as temporary,
@@ -450,10 +462,10 @@ class RetentionFailureTests(unittest.TestCase):
             ):
                 destination = Path(temporary) / "final-retention.json"
                 if kind == "valid":
-                    qualification.artifact(13, destination)
+                    qualification.artifact(13, destination, uploaded_digest)
                 else:
                     with self.assertRaises(RuntimeError):
-                        qualification.artifact(13, destination)
+                        qualification.artifact(13, destination, uploaded_digest)
                 receipt = json.loads(destination.read_text())
                 self.assertEqual(receipt["head"], source["head"])
                 self.assertEqual(receipt["run_id"], source["run_id"])

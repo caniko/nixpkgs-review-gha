@@ -237,12 +237,23 @@ def validate_success(directory, source):
 
 
 def seal(directory, outcome):
-    source = {}
+    directory.mkdir(parents=True, exist_ok=True)
+    source = {
+        "workflow_repository": os.environ.get("GITHUB_REPOSITORY"),
+        "workflow_sha": os.environ.get("GITHUB_SHA"),
+        "workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF"),
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "system": os.environ.get("SYSTEM"),
+        "source_head": os.environ.get("SOURCE_HEAD"),
+        "source_parent": os.environ.get("SOURCE_PARENT"),
+        "signed_review_sha256": os.environ.get("SOURCE_REVIEW_SHA256"),
+    }
     rejected = []
     try:
         document = json.loads((directory / "source.json").read_text())
         require(isinstance(document, dict), "Native source receipt is not an object")
-        source = document
+        source.update(document)
         if outcome == "success":
             validate_success(directory, source)
     except Exception as error:

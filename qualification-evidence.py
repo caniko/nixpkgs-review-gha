@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -209,6 +210,34 @@ def expected_red(directory):
     seal(directory, "expected-red", True)
 
 
+def artifact_metadata(artifact, source):
+    created = dt.datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
+    expiry = dt.datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
+    lifetime = (expiry - created).total_seconds()
+    require(
+        not artifact["expired"] and lifetime >= MIN_RETENTION_SECONDS,
+        f"Artifact {artifact['id']} lifetime is only {lifetime} seconds",
+    )
+    digest = artifact.get("digest", "")
+    require(
+        re.fullmatch(r"sha256:[0-9a-f]{64}", digest),
+        "Provider artifact SHA-256 is missing",
+    )
+    require(
+        artifact["workflow_run"]["head_sha"] == source["head"]
+        and artifact["workflow_run"]["id"] == source["run_id"],
+        "Artifact workflow source mismatch",
+    )
+    return {
+        "id": artifact["id"],
+        "name": artifact["name"],
+        "sha256": digest,
+        "created_at": artifact["created_at"],
+        "expires_at": artifact["expires_at"],
+        "retention_seconds": lifetime,
+    }
+
+
 def retained_artifacts(prefix, count):
     source = identity()
     retained = []
@@ -220,36 +249,7 @@ def retained_artifacts(prefix, count):
         for artifact in response["artifacts"]:
             if not artifact["name"].startswith(prefix):
                 continue
-            created = dt.datetime.fromisoformat(
-                artifact["created_at"].replace("Z", "+00:00")
-            )
-            expiry = dt.datetime.fromisoformat(
-                artifact["expires_at"].replace("Z", "+00:00")
-            )
-            lifetime = (expiry - created).total_seconds()
-            require(
-                not artifact["expired"] and lifetime >= MIN_RETENTION_SECONDS,
-                f"Artifact {artifact['id']} lifetime is only {lifetime} seconds",
-            )
-            digest = artifact.get("digest", "")
-            require(
-                digest.startswith("sha256:") and len(digest) == 71,
-                "Provider artifact SHA-256 is missing",
-            )
-            require(
-                artifact["workflow_run"]["head_sha"] == source["head"],
-                "Artifact workflow source mismatch",
-            )
-            retained.append(
-                {
-                    "id": artifact["id"],
-                    "name": artifact["name"],
-                    "sha256": digest,
-                    "created_at": artifact["created_at"],
-                    "expires_at": artifact["expires_at"],
-                    "retention_seconds": lifetime,
-                }
-            )
+            retained.append(artifact_metadata(artifact, source))
         if len(response["artifacts"]) < 100:
             break
         page += 1
@@ -283,6 +283,41 @@ def artifacts(prefix, count, destination):
     Path(destination).write_text(json.dumps(receipt, indent=2) + "\n")
 
 
+def artifact(artifact_id, destination, expected_digest=None):
+    receipt = {
+        "schema": "hosted-final-retention.v1",
+        "repository": os.environ.get("GITHUB_REPOSITORY"),
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "artifact_id": artifact_id,
+        "qualified": False,
+        "artifacts": [],
+    }
+    try:
+        source = identity()
+        receipt.update(source)
+        selected = api(f"actions/artifacts/{artifact_id}")
+        require(selected["id"] == artifact_id, "Provider artifact ID mismatch")
+        require(
+            selected["name"] == f"workflow-retention-audit-{source['head']}",
+            "Final retention artifact name mismatch",
+        )
+        receipt["artifacts"].append(artifact_metadata(selected, source))
+        if expected_digest is not None:
+            require(
+                re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+                and selected["digest"] == "sha256:" + expected_digest,
+                "Final retention artifact differs from the uploaded digest",
+            )
+        receipt.update(outcome="success", rejected=[])
+    except Exception as error:
+        receipt.update(outcome="failure", rejected=[str(error)])
+        raise
+    finally:
+        payload = json.dumps(receipt, indent=2) + "\n"
+        Path(destination).write_text(payload)
+        print(payload, end="")
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -298,6 +333,10 @@ def main():
     audit.add_argument("prefix")
     audit.add_argument("count", type=int)
     audit.add_argument("destination")
+    final = sub.add_parser("artifact")
+    final.add_argument("artifact_id", type=int)
+    final.add_argument("destination", type=Path)
+    final.add_argument("--sha256", required=True)
     args = parser.parse_args()
     if args.command == "initialize":
         initialize(args.directory)
@@ -305,8 +344,10 @@ def main():
         seal(args.directory, args.outcome, args.strict_reports)
     elif args.command == "expected-red":
         expected_red(args.directory)
-    else:
+    elif args.command == "artifacts":
         artifacts(args.prefix, args.count, args.destination)
+    else:
+        artifact(args.artifact_id, args.destination, args.sha256)
 
 
 if __name__ == "__main__":

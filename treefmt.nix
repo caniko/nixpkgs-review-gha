@@ -9,6 +9,8 @@
     "*.md"
     ".gitignore"
     "LICENSE"
+    # Digest-named source-review receipts are immutable byte contracts.
+    "source-reviews/paperclip/*.json"
   ];
 
   formatter.nixfmt = {
