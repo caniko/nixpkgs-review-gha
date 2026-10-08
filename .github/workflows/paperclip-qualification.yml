@@ -118,7 +118,7 @@ jobs:
           exec 3> >(tee "$EVIDENCE/build.log" >&2)
           log_pid=$!
           status=0
-          nix build --file ./nixpkgs paperclip nixosTests.paperclip --no-link --builders '' --max-jobs 1 --cores 2 --json -L 2>&3 | tee "$EVIDENCE/result.json" || status=$?
+          nix build --file ./nixpkgs paperclip nixosTests.paperclip --no-substitute --no-link --builders '' --max-jobs 1 --cores 2 --json -L 2>&3 | tee "$EVIDENCE/result.json" || status=$?
           exec 3>&-
           wait "$log_pid"
           printf '%s\n' "$status" > "$EVIDENCE/exit-status.txt"
@@ -142,6 +142,7 @@ jobs:
             test -n "$ATTIC_TOKEN"
             nix profile add .#attic-client --builders ''
             attic login default "$ATTIC_SERVER" "$ATTIC_TOKEN"
+            attic use "$ATTIC_CACHE"
             attic push "$ATTIC_CACHE" "${outputs[@]}"
             curl -fsS -H "Authorization: Bearer $ATTIC_TOKEN" "${ATTIC_SERVER%/}/_api/v1/cache-config/$ATTIC_CACHE" > "$EVIDENCE/cache-config.json"
             endpoint="$(jq -r .substituter_endpoint "$EVIDENCE/cache-config.json")"
@@ -150,6 +151,7 @@ jobs:
             test -n "$CACHE_NAME"
             test -n "$CACHIX_AUTH_TOKEN"
             nix profile add .#cachix --builders ''
+            cachix use "$CACHE_NAME"
             cachix push "$CACHE_NAME" "${outputs[@]}"
             curl -fsS -H "Authorization: Bearer $CACHIX_AUTH_TOKEN" "https://app.cachix.org/api/v1/cache/$CACHE_NAME" > "$EVIDENCE/cache-config.json"
             endpoint="$(jq -r .uri "$EVIDENCE/cache-config.json")"

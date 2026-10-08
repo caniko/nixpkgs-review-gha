@@ -16,6 +16,7 @@ SOURCE_PATHS = {
     "nixos/tests/paperclip.nix",
 }
 PARENT = "921ffc6b6ef3e56a58751007ad1c7dfa598f2e1b"
+REVIEW_DIRECTORY = Path(__file__).resolve().parent / "source-reviews" / "paperclip"
 
 
 def require(condition, message):
@@ -50,6 +51,20 @@ def source_identity(head, parent, review):
         re.fullmatch(r"[0-9a-f]{64}", review),
         "Signed-head/current-parent review receipt binding is missing",
     )
+    receipt_path = REVIEW_DIRECTORY / (review + ".json")
+    require(receipt_path.is_file(), "Accepted source-review receipt is missing")
+    require(digest(receipt_path) == review, "Source-review receipt digest mismatch")
+    receipt = json.loads(receipt_path.read_text())
+    require(
+        receipt.get("schema") == "paperclip-source-review.v1"
+        and receipt.get("decision") == "accepted"
+        and receipt.get("repository") == "NixOS/nixpkgs"
+        and receipt.get("pr") == 567242
+        and receipt.get("source_head") == head
+        and receipt.get("source_parent") == parent
+        and receipt.get("source_paths") == sorted(SOURCE_PATHS),
+        "Source-review receipt does not accept this exact head, parent, and grant",
+    )
     pr = api("repos/NixOS/nixpkgs/pulls/567242")
     require(
         pr["head"]["sha"] == head and not pr["merged"],
@@ -65,6 +80,11 @@ def source_identity(head, parent, review):
         "Source successor is not verified as signed",
     )
     paths = {member["filename"] for member in commit["files"]}
+    paths.update(
+        member["previous_filename"]
+        for member in commit["files"]
+        if "previous_filename" in member
+    )
     require(
         paths and paths <= SOURCE_PATHS, "Source successor exceeds the three-path grant"
     )
@@ -118,16 +138,83 @@ def initialize(directory):
         }
     )
     directory.mkdir(parents=True, exist_ok=True)
+    (directory / "source-review.json").write_bytes(
+        (REVIEW_DIRECTORY / (source["signed_review_sha256"] + ".json")).read_bytes()
+    )
     (directory / "source.json").write_text(json.dumps(source, indent=2) + "\n")
 
 
+def validate_success(directory, source):
+    source_identity(
+        source["source_head"],
+        source["source_parent"],
+        source["signed_review_sha256"],
+    )
+    require(
+        digest(directory / "source-review.json") == source["signed_review_sha256"],
+        "Retained source-review receipt digest mismatch",
+    )
+    results = json.loads((directory / "result.json").read_text())
+    require(
+        len(results) == 2 and all(item.get("outputs") for item in results),
+        "Package/full-P2-VM outputs are missing",
+    )
+    require(
+        (directory / "cache-readback.json").is_file(),
+        "Native cache qualification is missing",
+    )
+    require(
+        (directory / "derivations.json").is_file()
+        and (directory / "closure.json").is_file(),
+        "Installed/source closure binding is missing",
+    )
+
+    def paths(document):
+        return (
+            document
+            if isinstance(document, dict)
+            else {item["path"]: item for item in document}
+        )
+
+    local = paths(json.loads((directory / "closure.json").read_text()))
+    remote = paths(json.loads((directory / "cache-readback.json").read_text()))
+    outputs = {path for item in results for path in item["outputs"].values()}
+    require(
+        outputs <= remote.keys() and outputs <= local.keys(),
+        "Native cache readback omitted a required output",
+    )
+    require(
+        all(
+            local[path]["narHash"] == remote[path]["narHash"]
+            and local[path]["narSize"] == remote[path]["narSize"]
+            for path in outputs
+        ),
+        "Native cache content does not match the built outputs",
+    )
+    require(
+        (directory / "cache-verify.log").is_file(),
+        "Signed cache verification is missing",
+    )
+
+
 def seal(directory, outcome):
-    source = json.loads((directory / "source.json").read_text())
+    source = {}
+    rejected = []
+    try:
+        document = json.loads((directory / "source.json").read_text())
+        require(isinstance(document, dict), "Native source receipt is not an object")
+        source = document
+        if outcome == "success":
+            validate_success(directory, source)
+    except Exception as error:
+        rejected.append(str(error))
     receipt = {
         "schema": "paperclip-native-hosted.v1",
         **source,
         "qualified": False,
-        "outcome": outcome,
+        "outcome": "failure" if rejected else outcome,
+        "original_outcome": outcome,
+        "rejected": rejected,
         "members_sha256": {
             str(path.relative_to(directory)): digest(path)
             for path in sorted(directory.rglob("*"))
@@ -135,53 +222,7 @@ def seal(directory, outcome):
         },
     }
     (directory / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    if outcome == "success":
-        source_identity(
-            source["source_head"],
-            source["source_parent"],
-            source["signed_review_sha256"],
-        )
-        results = json.loads((directory / "result.json").read_text())
-        require(
-            len(results) == 2 and all(item.get("outputs") for item in results),
-            "Package/full-P2-VM outputs are missing",
-        )
-        require(
-            (directory / "cache-readback.json").is_file(),
-            "Native cache qualification is missing",
-        )
-        require(
-            (directory / "derivations.json").is_file()
-            and (directory / "closure.json").is_file(),
-            "Installed/source closure binding is missing",
-        )
-
-        def paths(document):
-            return (
-                document
-                if isinstance(document, dict)
-                else {item["path"]: item for item in document}
-            )
-
-        local = paths(json.loads((directory / "closure.json").read_text()))
-        remote = paths(json.loads((directory / "cache-readback.json").read_text()))
-        outputs = {path for item in results for path in item["outputs"].values()}
-        require(
-            outputs <= remote.keys() and outputs <= local.keys(),
-            "Native cache readback omitted a required output",
-        )
-        require(
-            all(
-                local[path]["narHash"] == remote[path]["narHash"]
-                and local[path]["narSize"] == remote[path]["narSize"]
-                for path in outputs
-            ),
-            "Native cache content does not match the built outputs",
-        )
-        require(
-            (directory / "cache-verify.log").is_file(),
-            "Signed cache verification is missing",
-        )
+    require(not rejected, "; ".join(rejected))
 
 
 def audit(destination):

@@ -187,7 +187,7 @@ def expected_red(directory):
     seal(directory, "expected-red", True)
 
 
-def artifacts(prefix, count, destination):
+def retained_artifacts(prefix, count):
     source = identity()
     retained = []
     page = 1
@@ -235,12 +235,29 @@ def artifacts(prefix, count, destination):
         len(retained) == count,
         f"Expected {count} required artifacts, found {len(retained)}",
     )
-    receipt = {
+    return {
         "schema": "hosted-retention.v1",
         **source,
         "qualified": False,
         "artifacts": retained,
     }
+
+
+def artifacts(prefix, count, destination):
+    try:
+        receipt = retained_artifacts(prefix, count)
+    except Exception as error:
+        receipt = {
+            "schema": "hosted-retention.v1",
+            "qualified": False,
+            "outcome": "failure",
+            "repository": os.environ.get("GITHUB_REPOSITORY"),
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "prefix": prefix,
+            "rejected": [str(error)],
+        }
+        Path(destination).write_text(json.dumps(receipt, indent=2) + "\n")
+        raise
     Path(destination).write_text(json.dumps(receipt, indent=2) + "\n")
 
 

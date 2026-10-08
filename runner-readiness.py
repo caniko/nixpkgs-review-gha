@@ -55,7 +55,7 @@ def configured(label, memory_gb):
         "The requested hosted runner is not Ready or has no capacity allocation",
     )
     require(
-        runner["machine_size"]["memory_gb"] >= memory_gb,
+        runner["machine_size_details"]["memory_gb"] >= memory_gb,
         "Hosted runner memory is below the qualification floor",
     )
     group = api(f"orgs/{owner}/actions/runner-groups/{runner['runner_group_id']}")

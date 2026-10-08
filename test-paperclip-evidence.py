@@ -1,5 +1,5 @@
-import importlib.util
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,6 +18,12 @@ spec = importlib.util.spec_from_file_location(
 )
 readiness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(readiness)
+
+spec = importlib.util.spec_from_file_location(
+    "qualification", Path(__file__).with_name("qualification-evidence.py")
+)
+qualification = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(qualification)
 
 
 class SourceBindingTests(unittest.TestCase):
@@ -90,8 +96,9 @@ class SourceBindingTests(unittest.TestCase):
             if kind == "changed-bytes":
                 review = self.review
                 (self.directory / (review + ".json")).write_text("{}\n")
-            with self.subTest(kind=kind), patch.object(
-                evidence, "api", side_effect=self.records()
+            with (
+                self.subTest(kind=kind),
+                patch.object(evidence, "api", side_effect=self.records()),
             ):
                 with self.assertRaises(RuntimeError):
                     evidence.source_identity("a" * 40, evidence.PARENT, review)
@@ -107,8 +114,9 @@ class SourceBindingTests(unittest.TestCase):
             ("source_paths", ["flake.lock"]),
         ]:
             review = self.write_review({**self.receipt, field: value})
-            with self.subTest(field=field), patch.object(
-                evidence, "api", side_effect=self.records()
+            with (
+                self.subTest(field=field),
+                patch.object(evidence, "api", side_effect=self.records()),
             ):
                 with self.assertRaises(RuntimeError):
                     evidence.source_identity("a" * 40, evidence.PARENT, review)
@@ -132,8 +140,9 @@ class SourceBindingTests(unittest.TestCase):
         }
         (self.directory / "source.json").write_text(json.dumps(source))
         for reason in ["PR head advanced", "Native cache content mismatch"]:
-            with self.subTest(reason=reason), patch.object(
-                evidence, "source_identity", side_effect=RuntimeError(reason)
+            with (
+                self.subTest(reason=reason),
+                patch.object(evidence, "source_identity", side_effect=RuntimeError(reason)),
             ):
                 with self.assertRaises(RuntimeError):
                     evidence.seal(self.directory, "success")
@@ -142,6 +151,40 @@ class SourceBindingTests(unittest.TestCase):
             self.assertEqual(receipt["original_outcome"], "success")
             self.assertEqual(receipt["rejected"], [reason])
             self.assertFalse(receipt["qualified"])
+
+    def test_success_requires_matching_outputs_and_cache_content(self):
+        source = {
+            "source_head": "a" * 40,
+            "source_parent": evidence.PARENT,
+            "signed_review_sha256": self.review,
+        }
+        outputs = ["/nix/store/package", "/nix/store/full-p2-vm"]
+        closure = {path: {"narHash": "sha256:content", "narSize": 42} for path in outputs}
+        (self.directory / "source.json").write_text(json.dumps(source))
+        (self.directory / "source-review.json").write_bytes(
+            (self.directory / (self.review + ".json")).read_bytes()
+        )
+        (self.directory / "result.json").write_text(
+            json.dumps([{"outputs": {"out": path}} for path in outputs])
+        )
+        (self.directory / "derivations.json").write_text("{}")
+        (self.directory / "closure.json").write_text(json.dumps(closure))
+        (self.directory / "cache-readback.json").write_text(json.dumps(closure))
+        (self.directory / "cache-verify.log").write_text("Signed cache verified")
+        with patch.object(evidence, "api", side_effect=self.records()):
+            evidence.seal(self.directory, "success")
+        receipt = json.loads((self.directory / "receipt.json").read_text())
+        self.assertEqual(receipt["outcome"], "success")
+        self.assertEqual(receipt["rejected"], [])
+        self.assertFalse(receipt["qualified"])
+        closure[outputs[1]]["narHash"] = "sha256:wrong-content"
+        (self.directory / "cache-readback.json").write_text(json.dumps(closure))
+        with patch.object(evidence, "api", side_effect=self.records()):
+            with self.assertRaisesRegex(RuntimeError, "Native cache content"):
+                evidence.seal(self.directory, "success")
+        receipt = json.loads((self.directory / "receipt.json").read_text())
+        self.assertEqual(receipt["outcome"], "failure")
+        self.assertIn("Native cache content", receipt["rejected"][0])
 
 
 class RunnerReadinessTests(unittest.TestCase):
@@ -167,8 +210,9 @@ class RunnerReadinessTests(unittest.TestCase):
             {"repositories": [{"id": 7}]},
         ]
         env = {"GITHUB_REPOSITORY": "org/controller", "GITHUB_RUN_ID": "12"}
-        with patch.dict(os.environ, env), patch.object(
-            readiness, "api", side_effect=records
+        with (
+            patch.dict(os.environ, env),
+            patch.object(readiness, "api", side_effect=records),
         ):
             receipt = readiness.configured("native-arm", 64)
         self.assertEqual(receipt["runner"]["name"], "native-arm")
@@ -189,11 +233,27 @@ class RunnerReadinessTests(unittest.TestCase):
                 ]
             },
         ]
-        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "org/controller"}), patch.object(
-            readiness, "api", side_effect=records
+        with (
+            patch.dict(os.environ, {"GITHUB_REPOSITORY": "org/controller"}),
+            patch.object(readiness, "api", side_effect=records),
         ):
             with self.assertRaisesRegex(RuntimeError, "memory"):
                 readiness.configured("small-arm", 64)
+
+
+class RetentionFailureTests(unittest.TestCase):
+    def test_rejected_retention_audit_keeps_its_failure_payload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "retention-audit.json"
+            with patch.object(
+                qualification, "identity", side_effect=RuntimeError("PR head advanced")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "PR head advanced"):
+                    qualification.artifacts("workflow-retention-", 1, destination)
+            receipt = json.loads(destination.read_text())
+            self.assertEqual(receipt["outcome"], "failure")
+            self.assertEqual(receipt["rejected"], ["PR head advanced"])
+            self.assertFalse(receipt["qualified"])
 
 
 if __name__ == "__main__":

@@ -75,11 +75,19 @@ jobs:
           persist-credentials: false
       - run: python3 qualification-evidence.py artifacts workflow-proof- 1 retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
           name: workflow-retention-${{ github.event.pull_request.head.sha }}
           path: retention.json
           retention-days: 31
           if-no-files-found: error
-      - run: |
-          test '${{ needs.source.result }}' = success
-          python3 qualification-evidence.py artifacts workflow-retention- 1 retention-audit.json
+      - run: python3 qualification-evidence.py artifacts workflow-retention- 1 retention-audit.json
+        if: always()
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: workflow-retention-audit-${{ github.event.pull_request.head.sha }}
+          path: retention-audit.json
+          retention-days: 31
+          if-no-files-found: error
+      - run: test '${{ needs.source.result }}' = success
