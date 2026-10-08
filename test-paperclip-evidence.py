@@ -142,7 +142,9 @@ class SourceBindingTests(unittest.TestCase):
         for reason in ["PR head advanced", "Native cache content mismatch"]:
             with (
                 self.subTest(reason=reason),
-                patch.object(evidence, "source_identity", side_effect=RuntimeError(reason)),
+                patch.object(
+                    evidence, "source_identity", side_effect=RuntimeError(reason)
+                ),
             ):
                 with self.assertRaises(RuntimeError):
                     evidence.seal(self.directory, "success")
@@ -159,7 +161,9 @@ class SourceBindingTests(unittest.TestCase):
             "signed_review_sha256": self.review,
         }
         outputs = ["/nix/store/package", "/nix/store/full-p2-vm"]
-        closure = {path: {"narHash": "sha256:content", "narSize": 42} for path in outputs}
+        closure = {
+            path: {"narHash": "sha256:content", "narSize": 42} for path in outputs
+        }
         (self.directory / "source.json").write_text(json.dumps(source))
         (self.directory / "source-review.json").write_bytes(
             (self.directory / (self.review + ".json")).read_bytes()
@@ -242,6 +246,80 @@ class RunnerReadinessTests(unittest.TestCase):
 
 
 class RetentionFailureTests(unittest.TestCase):
+    def native_artifacts(self):
+        return [
+            {
+                "id": index,
+                "name": "paperclip-native-proof-" + system,
+                "expired": False,
+                "created_at": "2026-10-08T00:00:00Z",
+                "expires_at": "2026-11-08T00:00:00Z",
+                "digest": "sha256:" + "a" * 64,
+            }
+            for index, system in enumerate(
+                ["readiness", "x86_64-linux", "aarch64-linux"]
+            )
+        ]
+
+    def test_native_audit_rejections_retain_diagnostics(self):
+        env = {
+            "GITHUB_REPOSITORY": "org/controller",
+            "GITHUB_RUN_ID": "12",
+            "GITHUB_SHA": "a" * 40,
+        }
+        for kind in ["source", "missing", "lifetime", "digest"]:
+            artifacts = self.native_artifacts()
+            head = env["GITHUB_SHA"]
+            if kind == "source":
+                head = "b" * 40
+            if kind == "missing":
+                artifacts.pop()
+            if kind == "lifetime":
+                artifacts[0]["expires_at"] = "2026-10-09T00:00:00Z"
+            if kind == "digest":
+                artifacts[0]["digest"] = ""
+            with (
+                self.subTest(kind=kind),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.dict(os.environ, env),
+                patch.object(
+                    evidence, "api",
+                    side_effect=[{"head_sha": head}, {"artifacts": artifacts}],
+                ),
+            ):
+                destination = Path(temporary) / "retention.json"
+                with self.assertRaises(RuntimeError):
+                    evidence.audit(destination)
+                self.assertTrue(destination.is_file(), "Rejection receipt was lost")
+                receipt = json.loads(destination.read_text())
+                self.assertEqual(receipt["outcome"], "failure")
+                self.assertTrue(receipt["rejected"])
+                self.assertEqual(receipt["workflow_sha"], env["GITHUB_SHA"])
+                self.assertFalse(receipt["qualified"])
+
+    def test_native_audit_keeps_all_three_valid_artifacts(self):
+        env = {
+            "GITHUB_REPOSITORY": "org/controller",
+            "GITHUB_RUN_ID": "12",
+            "GITHUB_SHA": "a" * 40,
+        }
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, env),
+            patch.object(
+                evidence, "api",
+                side_effect=[
+                    {"head_sha": env["GITHUB_SHA"]},
+                    {"artifacts": self.native_artifacts()},
+                ],
+            ),
+        ):
+            destination = Path(temporary) / "retention.json"
+            evidence.audit(destination)
+            receipt = json.loads(destination.read_text())
+            self.assertEqual(len(receipt["artifacts"]), 3)
+            self.assertFalse(receipt["qualified"])
+
     def test_rejected_retention_audit_keeps_its_failure_payload(self):
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "retention-audit.json"
