@@ -219,15 +219,17 @@ jobs:
       - name: Require native GREEN and read actual audit-artifact lifetime
         env:
           ARTIFACT_ID: ${{ steps.audit.outputs.artifact-id }}
+          ARTIFACT_SHA256: ${{ steps.audit.outputs.artifact-digest }}
         run: |
           test '${{ needs.readiness.result }}' = success
           test '${{ needs.native.result }}' = success
           python3 - <<'PY'
-          import datetime as dt, json, os, urllib.request
+          import datetime as dt, json, os, re, urllib.request
           url = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/artifacts/' + os.environ['ARTIFACT_ID']
           request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
           with urllib.request.urlopen(request, timeout=30) as response: artifact = json.load(response)
           lifetime = (dt.datetime.fromisoformat(artifact['expires_at'].replace('Z', '+00:00')) - dt.datetime.fromisoformat(artifact['created_at'].replace('Z', '+00:00'))).total_seconds()
           assert not artifact['expired'] and lifetime >= 2592000
-          assert artifact['digest'].startswith('sha256:')
+          assert re.fullmatch(r'[0-9a-f]{64}', os.environ['ARTIFACT_SHA256'])
+          assert artifact['digest'] == 'sha256:' + os.environ['ARTIFACT_SHA256']
           PY
