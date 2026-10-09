@@ -551,6 +551,7 @@ class RetentionFailureTests(unittest.TestCase):
             "GITHUB_REPOSITORY": "org/controller",
             "GITHUB_RUN_ID": "12",
             "GITHUB_SHA": "a" * 40,
+            **self.native_upload_env(),
         }
         for kind in ["source", "missing", "lifetime", "digest"]:
             artifacts = self.native_artifacts()
@@ -611,6 +612,7 @@ class RetentionFailureTests(unittest.TestCase):
             "GITHUB_REPOSITORY": "org/controller",
             "GITHUB_RUN_ID": "12",
             "GITHUB_SHA": "a" * 40,
+            **self.native_upload_env(),
         }
         with (
             tempfile.TemporaryDirectory() as temporary,
@@ -633,6 +635,15 @@ class RetentionFailureTests(unittest.TestCase):
             self.assertEqual(receipt["outcome"], "success")
             self.assertEqual(receipt["rejected"], [])
             self.assertFalse(receipt["qualified"])
+
+    def native_upload_env(self):
+        env = {}
+        for artifact in self.native_artifacts():
+            system = artifact["name"].removeprefix("paperclip-native-proof-")
+            prefix = system.upper().replace("-", "_") + "_ARTIFACT_"
+            env[prefix + "ID"] = str(artifact["id"])
+            env[prefix + "SHA256"] = artifact["digest"].removeprefix("sha256:")
+        return env
 
     def test_native_audit_binds_each_proof_to_its_upload_identity(self):
         systems = ["readiness", "x86_64-linux", "aarch64-linux"]
@@ -787,6 +798,59 @@ class NativeWorkflowFailureTests(unittest.TestCase):
         if match[1] == "|":
             return textwrap.dedent(step[match.end() + 1 :])
         return match[1]
+
+    def test_proof_upload_matrix_exports_preserve_both_architectures(self):
+        header, steps = self.job("native")
+        _, retention_steps = self.job("retention")
+        exporter = next(step for step in steps if "id: proof_identity" in step)
+        self.assertIn("if: always() && steps.proof.outcome == 'success'", exporter)
+        self.assertIn("ARTIFACT_ID: ${{ steps.proof.outputs.artifact-id }}", exporter)
+        self.assertIn(
+            "ARTIFACT_SHA256: ${{ steps.proof.outputs.artifact-digest }}", exporter
+        )
+        combined = {}
+        for index, system in enumerate(["x86_64-linux", "aarch64-linux"], start=1):
+            with self.subTest(system=system), tempfile.TemporaryDirectory() as temporary:
+                destination = Path(temporary) / "github-output"
+                env = {
+                    **os.environ,
+                    "SYSTEM": system,
+                    "ARTIFACT_ID": str(index),
+                    "ARTIFACT_SHA256": str(index) * 64,
+                    "GITHUB_OUTPUT": str(destination),
+                }
+                completed = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", self.run_script(exporter)],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                outputs = dict(
+                    line.split("=", 1) for line in destination.read_text().splitlines()
+                )
+                prefix = system.replace("-", "_") + "_artifact_"
+                self.assertEqual(
+                    outputs,
+                    {prefix + "id": str(index), prefix + "sha256": str(index) * 64},
+                )
+                self.assertTrue(combined.keys().isdisjoint(outputs))
+                for key in outputs:
+                    self.assertIn(
+                        key + ": ${{ steps.proof_identity.outputs." + key + " }}",
+                        header,
+                    )
+                combined.update(outputs)
+        self.assertEqual(len(combined), 4)
+        retention_header, _ = self.job("retention")
+        for key in combined:
+            self.assertIn(
+                key.upper() + ": ${{ needs.native.outputs." + key + " }}",
+                retention_header,
+            )
+        self.assertTrue(
+            any("paperclip-evidence.py audit" in step for step in retention_steps)
+        )
 
     def test_failed_source_checkout_retains_receipt_at_the_upload_path(self):
         header, steps = self.job("native")

@@ -26,6 +26,8 @@ jobs:
     outputs:
       x86: ${{ steps.x86.outputs.label }}
       arm: ${{ steps.arm.outputs.label }}
+      artifact_id: ${{ steps.proof.outputs.artifact-id }}
+      artifact_sha256: ${{ steps.proof.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -60,6 +62,7 @@ jobs:
         run: python3 runner-readiness.py --memory-gb 64 --destination readiness-arm.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
+        id: proof
         with:
           name: paperclip-native-proof-readiness
           path: readiness-*.json
@@ -68,6 +71,11 @@ jobs:
 
   native:
     needs: readiness
+    outputs:
+      x86_64_linux_artifact_id: ${{ steps.proof_identity.outputs.x86_64_linux_artifact_id }}
+      x86_64_linux_artifact_sha256: ${{ steps.proof_identity.outputs.x86_64_linux_artifact_sha256 }}
+      aarch64_linux_artifact_id: ${{ steps.proof_identity.outputs.aarch64_linux_artifact_id }}
+      aarch64_linux_artifact_sha256: ${{ steps.proof_identity.outputs.aarch64_linux_artifact_sha256 }}
     runs-on: ${{ matrix.system == 'aarch64-linux' && needs.readiness.outputs.arm || needs.readiness.outputs.x86 }}
     timeout-minutes: 120
     strategy:
@@ -188,11 +196,23 @@ jobs:
         run: python3 paperclip-evidence.py seal "$EVIDENCE" '${{ job.status }}'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
+        id: proof
         with:
           name: paperclip-native-proof-${{ matrix.system }}
           path: ${{ runner.temp }}/paperclip-native/
           retention-days: 31
           if-no-files-found: error
+      - name: Preserve each architecture's proof upload identity
+        if: always() && steps.proof.outcome == 'success'
+        id: proof_identity
+        env:
+          ARTIFACT_ID: ${{ steps.proof.outputs.artifact-id }}
+          ARTIFACT_SHA256: ${{ steps.proof.outputs.artifact-digest }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          prefix="${SYSTEM//-/_}"
+          # Distinct matrix output names prevent one architecture overwriting another.
+          printf '%s_artifact_id=%s\n%s_artifact_sha256=%s\n' "$prefix" "$ARTIFACT_ID" "$prefix" "$ARTIFACT_SHA256" >> "$GITHUB_OUTPUT"
 
   retention:
     needs: [readiness, native]
@@ -204,6 +224,12 @@ jobs:
       SOURCE_HEAD: ${{ inputs.head }}
       SOURCE_PARENT: ${{ inputs.parent }}
       SOURCE_REVIEW_SHA256: ${{ inputs.source-review-sha256 }}
+      READINESS_ARTIFACT_ID: ${{ needs.readiness.outputs.artifact_id }}
+      READINESS_ARTIFACT_SHA256: ${{ needs.readiness.outputs.artifact_sha256 }}
+      X86_64_LINUX_ARTIFACT_ID: ${{ needs.native.outputs.x86_64_linux_artifact_id }}
+      X86_64_LINUX_ARTIFACT_SHA256: ${{ needs.native.outputs.x86_64_linux_artifact_sha256 }}
+      AARCH64_LINUX_ARTIFACT_ID: ${{ needs.native.outputs.aarch64_linux_artifact_id }}
+      AARCH64_LINUX_ARTIFACT_SHA256: ${{ needs.native.outputs.aarch64_linux_artifact_sha256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

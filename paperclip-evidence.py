@@ -275,8 +275,21 @@ def seal(directory, outcome):
     require(not rejected, "; ".join(rejected))
 
 
+def proof_uploads():
+    uploads = {}
+    for system in ["readiness", "x86_64-linux", "aarch64-linux"]:
+        prefix = system.upper().replace("-", "_") + "_ARTIFACT_"
+        uploads["paperclip-native-proof-" + system] = {
+            "id": os.environ.get(prefix + "ID", ""),
+            "sha256": os.environ.get(prefix + "SHA256", ""),
+        }
+    return uploads
+
+
 def validate_retention(retained):
     repository = os.environ["GITHUB_REPOSITORY"]
+    uploads = proof_uploads()
+    seen = set()
     require(
         api(f"repos/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}")[
             "head_sha"
@@ -291,6 +304,24 @@ def validate_retention(retained):
         for artifact in artifacts:
             if not artifact["name"].startswith("paperclip-native-proof-"):
                 continue
+            name = artifact["name"]
+            require(
+                name in uploads and name not in seen,
+                "Unexpected or duplicate native proof artifact",
+            )
+            upload = uploads[name]
+            require(
+                re.fullmatch(r"[1-9][0-9]*", upload["id"]),
+                "Proof upload artifact ID is missing or malformed",
+            )
+            require(
+                re.fullmatch(r"[0-9a-f]{64}", upload["sha256"]),
+                "Proof upload digest is missing or malformed",
+            )
+            require(
+                str(artifact["id"]) == upload["id"],
+                "Native proof artifact ID differs from its upload",
+            )
             lifetime = (
                 dt.datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
                 - dt.datetime.fromisoformat(
@@ -305,19 +336,25 @@ def validate_retention(retained):
                 re.fullmatch(r"sha256:[0-9a-f]{64}", artifact.get("digest", "")),
                 "Provider artifact digest is missing",
             )
+            require(
+                artifact["digest"] == "sha256:" + upload["sha256"],
+                "Native proof artifact digest differs from its upload",
+            )
             retained.append(
                 {
                     "id": artifact["id"],
                     "name": artifact["name"],
                     "sha256": artifact["digest"],
+                    "upload_sha256": upload["sha256"],
                     "retention_seconds": lifetime,
                     "expires_at": artifact["expires_at"],
                 }
             )
+            seen.add(name)
         if len(artifacts) < 100:
             break
     require(
-        len(retained) == 3,
+        seen == uploads.keys() and len(retained) == 3,
         "Readiness and both native architectures must retain evidence",
     )
 
@@ -332,6 +369,7 @@ def audit(destination):
         "source_head": os.environ.get("SOURCE_HEAD", ""),
         "source_parent": os.environ.get("SOURCE_PARENT", ""),
         "signed_review_sha256": os.environ.get("SOURCE_REVIEW_SHA256", ""),
+        "uploads": proof_uploads(),
         "artifacts": [],
     }
     try:
