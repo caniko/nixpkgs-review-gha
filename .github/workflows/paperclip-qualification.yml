@@ -81,11 +81,14 @@ jobs:
       SOURCE_HEAD: ${{ inputs.head }}
       SOURCE_PARENT: ${{ inputs.parent }}
       SOURCE_REVIEW_SHA256: ${{ inputs.source-review-sha256 }}
+      EVIDENCE: ${{ runner.temp }}/paperclip-native
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Initialize the evidence directory before source checkout
+        run: mkdir -p "$EVIDENCE"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           repository: NixOS/nixpkgs
@@ -94,10 +97,7 @@ jobs:
           persist-credentials: false
       - name: Bind exact signed source, native architecture, and hosted KVM
         run: |
-          evidence="$RUNNER_TEMP/paperclip-native"
-          mkdir -p "$evidence"
-          echo "EVIDENCE=$evidence" >> "$GITHUB_ENV"
-          python3 paperclip-evidence.py initialize "$evidence"
+          python3 paperclip-evidence.py initialize "$EVIDENCE"
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(uname -m)-linux" = "$SYSTEM"
           # Provider readiness requires 64 GiB; usable RAM excludes kernel reserves.
@@ -217,12 +217,11 @@ jobs:
           retention-days: 31
           if-no-files-found: error
       - name: Require native GREEN and read actual audit-artifact lifetime
+        if: always() && steps.audit.outcome == 'success'
         env:
           ARTIFACT_ID: ${{ steps.audit.outputs.artifact-id }}
           ARTIFACT_SHA256: ${{ steps.audit.outputs.artifact-digest }}
         run: |
-          test '${{ needs.readiness.result }}' = success
-          test '${{ needs.native.result }}' = success
           python3 - <<'PY'
           import datetime as dt, json, os, re, urllib.request
           url = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/artifacts/' + os.environ['ARTIFACT_ID']
@@ -233,3 +232,5 @@ jobs:
           assert re.fullmatch(r'[0-9a-f]{64}', os.environ['ARTIFACT_SHA256'])
           assert artifact['digest'] == 'sha256:' + os.environ['ARTIFACT_SHA256']
           PY
+          test '${{ needs.readiness.result }}' = success
+          test '${{ needs.native.result }}' = success
