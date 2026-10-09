@@ -752,8 +752,10 @@ class NativeWorkflowFailureTests(unittest.TestCase):
                 env.pop("EVIDENCE", None)
                 declared = re.search(r"(?m)^      EVIDENCE: (.+)$", header)
                 if declared:
-                    env["EVIDENCE"] = declared[1].strip("'\"").replace(
-                        "${{ runner.temp }}", str(runner)
+                    env["EVIDENCE"] = (
+                        declared[1]
+                        .strip("'\"")
+                        .replace("${{ runner.temp }}", str(runner))
                     )
                 for step in steps:
                     if "repository: NixOS/nixpkgs" in step:
@@ -792,7 +794,9 @@ class NativeWorkflowFailureTests(unittest.TestCase):
                 )
                 upload_path = re.search(r"(?m)^          path: (.+)$", uploader)[1]
                 directory = Path(upload_path.replace("${{ runner.temp }}", str(runner)))
-                self.assertTrue((directory / "receipt.json").is_file(), completed.stderr)
+                self.assertTrue(
+                    (directory / "receipt.json").is_file(), completed.stderr
+                )
                 self.assertFalse((controller / "receipt.json").exists())
                 receipt = json.loads((directory / "receipt.json").read_text())
                 self.assertEqual(receipt["source_head"], env["SOURCE_HEAD"])
