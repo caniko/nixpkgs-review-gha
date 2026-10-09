@@ -1,9 +1,11 @@
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -484,6 +486,48 @@ class RetentionFailureTests(unittest.TestCase):
                 else:
                     self.assertTrue(receipt["rejected"])
                 self.assertFalse(receipt["qualified"])
+
+    def test_native_final_upload_rejects_digest_drift(self):
+        workflow = (
+            Path(__file__).parent
+            / ".github/workflows/paperclip-qualification.yml"
+        ).read_text()
+        script = textwrap.dedent(
+            workflow.split("python3 - <<'PY'")[-1].rsplit("\n          PY", 1)[0]
+        )
+        cases = [
+            ("b" * 64, "sha256:" + "b" * 64, True),
+            ("b" * 64, "sha256:" + "c" * 64, False),
+            ("", "sha256:" + "b" * 64, False),
+            ("z" * 64, "sha256:" + "z" * 64, False),
+            ("b" * 64, "sha256:", False),
+        ]
+        for uploaded, stored, accepted in cases:
+            artifact = {
+                "expired": False,
+                "created_at": "2026-10-08T00:00:00Z",
+                "expires_at": "2026-11-08T00:00:00Z",
+                "digest": stored,
+            }
+            env = {
+                "GITHUB_REPOSITORY": "org/controller",
+                "GH_TOKEN": "test-only",
+                "ARTIFACT_ID": "13",
+                "ARTIFACT_SHA256": uploaded,
+            }
+            with (
+                self.subTest(uploaded=uploaded, stored=stored),
+                patch.dict(os.environ, env),
+                patch(
+                    "urllib.request.urlopen",
+                    return_value=io.BytesIO(json.dumps(artifact).encode()),
+                ),
+            ):
+                if accepted:
+                    exec(script, {})
+                else:
+                    with self.assertRaises(AssertionError):
+                        exec(script, {})
 
     def native_artifacts(self):
         return [
