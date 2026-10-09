@@ -534,7 +534,7 @@ class RetentionFailureTests(unittest.TestCase):
     def native_artifacts(self):
         return [
             {
-                "id": index,
+                "id": index + 1,
                 "name": "paperclip-native-proof-" + system,
                 "expired": False,
                 "created_at": "2026-10-08T00:00:00Z",
@@ -633,6 +633,72 @@ class RetentionFailureTests(unittest.TestCase):
             self.assertEqual(receipt["outcome"], "success")
             self.assertEqual(receipt["rejected"], [])
             self.assertFalse(receipt["qualified"])
+
+    def test_native_audit_binds_each_proof_to_its_upload_identity(self):
+        systems = ["readiness", "x86_64-linux", "aarch64-linux"]
+        for index, system in enumerate(systems):
+            for kind in [
+                "valid",
+                "provider-drift",
+                "missing-upload-digest",
+                "malformed-upload-digest",
+                "different-upload-id",
+                "missing-upload-id",
+                "different-proof-name",
+            ]:
+                artifacts = self.native_artifacts()
+                env = {
+                    "GITHUB_REPOSITORY": "org/controller",
+                    "GITHUB_RUN_ID": "12",
+                    "GITHUB_SHA": "a" * 40,
+                }
+                for proof_system, artifact in zip(systems, artifacts):
+                    prefix = proof_system.upper().replace("-", "_") + "_ARTIFACT_"
+                    env[prefix + "ID"] = str(artifact["id"])
+                    env[prefix + "SHA256"] = artifact["digest"].removeprefix("sha256:")
+                prefix = system.upper().replace("-", "_") + "_ARTIFACT_"
+                if kind == "provider-drift":
+                    artifacts[index]["digest"] = "sha256:" + "b" * 64
+                elif kind == "missing-upload-digest":
+                    env[prefix + "SHA256"] = ""
+                elif kind == "malformed-upload-digest":
+                    env[prefix + "SHA256"] = "z" * 64
+                elif kind == "different-upload-id":
+                    env[prefix + "ID"] = "99"
+                elif kind == "missing-upload-id":
+                    env[prefix + "ID"] = ""
+                elif kind == "different-proof-name":
+                    artifacts[index]["name"] = "paperclip-native-proof-unexpected"
+                with (
+                    self.subTest(system=system, kind=kind),
+                    tempfile.TemporaryDirectory() as temporary,
+                    patch.dict(os.environ, env),
+                    patch.object(evidence, "controller_identity"),
+                    patch.object(evidence, "source_identity", return_value={}),
+                    patch.object(
+                        evidence,
+                        "api",
+                        side_effect=[
+                            {"head_sha": env["GITHUB_SHA"]},
+                            {"artifacts": artifacts},
+                        ],
+                    ),
+                ):
+                    destination = Path(temporary) / "retention.json"
+                    if kind == "valid":
+                        evidence.audit(destination)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            evidence.audit(destination)
+                    receipt = json.loads(destination.read_text())
+                    self.assertEqual(
+                        receipt["outcome"], "success" if kind == "valid" else "failure"
+                    )
+                    self.assertFalse(receipt["qualified"])
+                    if kind == "valid":
+                        self.assertEqual(len(receipt["artifacts"]), 3)
+                    else:
+                        self.assertTrue(receipt["rejected"])
 
     def test_final_audit_rejects_live_controller_movement(self):
         with (
