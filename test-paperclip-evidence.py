@@ -489,8 +489,7 @@ class RetentionFailureTests(unittest.TestCase):
 
     def test_native_final_upload_rejects_digest_drift(self):
         workflow = (
-            Path(__file__).parent
-            / ".github/workflows/paperclip-qualification.yml"
+            Path(__file__).parent / ".github/workflows/paperclip-qualification.yml"
         ).read_text()
         script = textwrap.dedent(
             workflow.split("python3 - <<'PY'")[-1].rsplit("\n          PY", 1)[0]
