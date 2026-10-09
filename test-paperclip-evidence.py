@@ -810,7 +810,10 @@ class NativeWorkflowFailureTests(unittest.TestCase):
         )
         combined = {}
         for index, system in enumerate(["x86_64-linux", "aarch64-linux"], start=1):
-            with self.subTest(system=system), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(system=system),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 destination = Path(temporary) / "github-output"
                 env = {
                     **os.environ,
