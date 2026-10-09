@@ -81,14 +81,16 @@ jobs:
       SOURCE_HEAD: ${{ inputs.head }}
       SOURCE_PARENT: ${{ inputs.parent }}
       SOURCE_REVIEW_SHA256: ${{ inputs.source-review-sha256 }}
-      EVIDENCE: ${{ runner.temp }}/paperclip-native
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Initialize the evidence directory before source checkout
-        run: mkdir -p "$EVIDENCE"
+        run: |
+          evidence="$RUNNER_TEMP/paperclip-native"
+          mkdir -p "$evidence"
+          echo "EVIDENCE=$evidence" >> "$GITHUB_ENV"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           repository: NixOS/nixpkgs
