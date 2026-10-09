@@ -4,6 +4,9 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -699,6 +702,177 @@ class RetentionFailureTests(unittest.TestCase):
             self.assertEqual(receipt["outcome"], "failure")
             self.assertEqual(receipt["rejected"], ["PR head advanced"])
             self.assertFalse(receipt["qualified"])
+
+
+class NativeWorkflowFailureTests(unittest.TestCase):
+    def job(self, name):
+        workflow = (
+            Path(__file__).parent / ".github/workflows/paperclip-qualification.yml"
+        ).read_text()
+        body = workflow.split(f"  {name}:\n", 1)[1]
+        body = re.split(r"(?m)^  [a-z]+:\n", body, maxsplit=1)[0]
+        header, steps = body.split("    steps:\n", 1)
+        return header, re.split(r"(?m)^      - ", steps)[1:]
+
+    def run_script(self, step):
+        match = re.search(r"(?:^|\n        )run: (.*)", step)
+        if match is None:
+            return None
+        if match[1] == "|":
+            return textwrap.dedent(step[match.end() + 1 :])
+        return match[1]
+
+    def test_failed_source_checkout_retains_receipt_at_the_upload_path(self):
+        header, steps = self.job("native")
+        for system in ["x86_64-linux", "aarch64-linux"]:
+            with (
+                self.subTest(system=system),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                controller = Path(temporary) / "controller"
+                controller.mkdir()
+                runner = Path(temporary) / "runner temp"
+                runner.mkdir()
+                (controller / "paperclip-evidence.py").write_bytes(
+                    Path(__file__).with_name("paperclip-evidence.py").read_bytes()
+                )
+                env = {
+                    **os.environ,
+                    "RUNNER_TEMP": str(runner),
+                    "GITHUB_ENV": str(runner / "github-env"),
+                    "GITHUB_REPOSITORY": "org/controller",
+                    "GITHUB_SHA": "a" * 40,
+                    "GITHUB_RUN_ID": "12",
+                    "GITHUB_RUN_ATTEMPT": "1",
+                    "SYSTEM": system,
+                    "SOURCE_HEAD": "b" * 40,
+                    "SOURCE_PARENT": evidence.PARENT,
+                    "SOURCE_REVIEW_SHA256": "c" * 64,
+                }
+                env.pop("EVIDENCE", None)
+                declared = re.search(r"(?m)^      EVIDENCE: (.+)$", header)
+                if declared:
+                    env["EVIDENCE"] = declared[1].strip("'\"").replace(
+                        "${{ runner.temp }}", str(runner)
+                    )
+                for step in steps:
+                    if "repository: NixOS/nixpkgs" in step:
+                        break  # The external source checkout fails here.
+                    script = self.run_script(step)
+                    if script:
+                        completed = subprocess.run(
+                            ["bash", "-eo", "pipefail", "-c", script],
+                            cwd=controller,
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(completed.returncode, 0, completed.stderr)
+                        exports = Path(env["GITHUB_ENV"])
+                        if exports.is_file():
+                            for line in exports.read_text().splitlines():
+                                key, value = line.split("=", 1)
+                                env[key] = value
+                else:
+                    self.fail("The native source checkout is missing")
+                sealer = next(
+                    step for step in steps if "paperclip-evidence.py seal" in step
+                )
+                script = self.run_script(sealer).replace("${{ job.status }}", "failure")
+                completed = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", script],
+                    cwd=controller,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                uploader = next(
+                    step for step in steps if "uses: actions/upload-artifact@" in step
+                )
+                upload_path = re.search(r"(?m)^          path: (.+)$", uploader)[1]
+                directory = Path(upload_path.replace("${{ runner.temp }}", str(runner)))
+                self.assertTrue((directory / "receipt.json").is_file(), completed.stderr)
+                self.assertFalse((controller / "receipt.json").exists())
+                receipt = json.loads((directory / "receipt.json").read_text())
+                self.assertEqual(receipt["source_head"], env["SOURCE_HEAD"])
+                self.assertEqual(receipt["system"], system)
+                self.assertEqual(receipt["outcome"], "failure")
+                self.assertTrue(receipt["rejected"])
+                self.assertFalse(receipt["qualified"])
+
+    def test_final_readback_runs_on_rejection_before_prerequisite_result_gates(self):
+        _, steps = self.job("retention")
+        step = next(step for step in steps if "ARTIFACT_ID:" in step)
+        condition = re.search(r"(?m)^        if: (.+)$", step)
+        cases = [
+            ("success", "success", False, False),
+            ("success", "success", True, False),
+            ("failure", "skipped", True, False),
+            ("success", "failure", True, False),
+            ("success", "cancelled", True, False),
+            ("success", "success", True, True),
+        ]
+        for ready, native, audit_failed, drift in cases:
+            with (
+                self.subTest(
+                    ready=ready, native=native, audit_failed=audit_failed, drift=drift
+                ),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                directory = Path(temporary)
+                marker = directory / "provider-readback"
+                shim = directory / "python3"
+                shim.write_text(
+                    f"#!{sys.executable}\n"
+                    "import io, json, os, sys, urllib.request\n"
+                    "from pathlib import Path\n"
+                    "def provider(request, timeout):\n"
+                    "    Path(os.environ['READBACK_MARKER']).write_text(request.full_url)\n"
+                    "    return io.BytesIO(os.environ['PROVIDER_BYTES'].encode())\n"
+                    "urllib.request.urlopen = provider\n"
+                    "exec(sys.stdin.read(), {})\n"
+                )
+                shim.chmod(0o700)
+                env = {
+                    **os.environ,
+                    "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                    "GITHUB_REPOSITORY": "org/controller",
+                    "GH_TOKEN": "test-only",
+                    "ARTIFACT_ID": "13",
+                    "ARTIFACT_SHA256": "b" * 64,
+                    "READBACK_MARKER": str(marker),
+                    "PROVIDER_BYTES": json.dumps(
+                        {
+                            "expired": False,
+                            "created_at": "2026-10-08T00:00:00Z",
+                            "expires_at": "2026-11-08T00:00:00Z",
+                            "digest": "sha256:" + ("c" if drift else "b") * 64,
+                        }
+                    ),
+                }
+                completed = None
+                # Actions adds success() when no status-check function is present.
+                if not audit_failed or (condition and "always()" in condition[1]):
+                    script = self.run_script(step)
+                    script = script.replace("${{ needs.readiness.result }}", ready)
+                    script = script.replace("${{ needs.native.result }}", native)
+                    completed = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", script],
+                        cwd=directory,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                    )
+                self.assertTrue(
+                    marker.is_file(), "Final uploaded rejection was not read back"
+                )
+                self.assertEqual(
+                    marker.read_text(),
+                    "https://api.github.com/repos/org/controller/actions/artifacts/13",
+                )
+                accepted = ready == native == "success" and not drift
+                self.assertEqual(completed.returncode == 0, accepted, completed.stderr)
 
 
 if __name__ == "__main__":
