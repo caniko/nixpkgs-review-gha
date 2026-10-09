@@ -405,7 +405,9 @@ class RetentionFailureTests(unittest.TestCase):
                     with self.assertRaises(Exception):
                         evidence.seal(directory, "failure")
                 receipt = json.loads((directory / "receipt.json").read_text())
-                self.assertEqual(receipt["workflow_repository"], env["GITHUB_REPOSITORY"])
+                self.assertEqual(
+                    receipt["workflow_repository"], env["GITHUB_REPOSITORY"]
+                )
                 self.assertEqual(receipt["workflow_sha"], env["GITHUB_SHA"])
                 self.assertEqual(receipt["run_id"], env["GITHUB_RUN_ID"])
                 self.assertEqual(receipt["attempt"], env["GITHUB_RUN_ATTEMPT"])
@@ -473,7 +475,9 @@ class RetentionFailureTests(unittest.TestCase):
                     receipt["outcome"], "success" if kind == "valid" else "failure"
                 )
                 if kind == "valid":
-                    self.assertEqual(receipt["artifacts"][0]["sha256"], original["digest"])
+                    self.assertEqual(
+                        receipt["artifacts"][0]["sha256"], original["digest"]
+                    )
                     self.assertGreaterEqual(
                         receipt["artifacts"][0]["retention_seconds"], 2592000
                     )
