@@ -8,6 +8,12 @@
       ],
       "type": "string"
     },
+    "CompilerCache": {
+      "enum": [
+        "kvrocks-v1"
+      ],
+      "type": "string"
+    },
     "Mode": {
       "enum": [
         "head",
@@ -66,6 +72,17 @@
       },
       "type": "array"
     },
+    "compiler_cache": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CompilerCache"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Explicit compiler-cache admission; absent legacy requests keep their digest."
+    },
     "directory": {
       "default": ".",
       "type": "string"
@@ -85,6 +102,13 @@
     "mode": {
       "$ref": "#/$defs/Mode",
       "default": "head"
+    },
+    "nixpkgs_broken_warnings": {
+      "description": "Package-scoped Nixpkgs broken warnings; omitted for legacy request identity.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "packages": {
       "default": [],
