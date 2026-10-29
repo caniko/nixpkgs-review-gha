@@ -8,9 +8,75 @@
       ],
       "type": "string"
     },
+    "BootstrapReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "binary_sha256": {
+          "type": "string"
+        },
+        "nar_hash": {
+          "type": "string"
+        },
+        "nar_size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/NativeSource"
+        }
+      },
+      "required": [
+        "source",
+        "nar_hash",
+        "nar_size",
+        "binary_sha256"
+      ],
+      "type": "object"
+    },
+    "CacheReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "ready": {
+          "$ref": "#/$defs/ReadyReceipt"
+        },
+        "sandbox_derivation": {
+          "type": "string"
+        },
+        "sandbox_output": {
+          "type": "string"
+        },
+        "sandbox_receipt_sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ready",
+        "sandbox_derivation",
+        "sandbox_output",
+        "sandbox_receipt_sha256"
+      ],
+      "type": "object"
+    },
+    "CompilerCache": {
+      "enum": [
+        "kvrocks-v1"
+      ],
+      "type": "string"
+    },
     "EffectivePlan": {
       "additionalProperties": false,
       "properties": {
+        "compiler_cache": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CacheReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "digest": {
           "type": "string"
         },
@@ -109,6 +175,46 @@
         "nar_hash",
         "nar_size",
         "references"
+      ],
+      "type": "object"
+    },
+    "NativeSource": {
+      "additionalProperties": false,
+      "properties": {
+        "derivation": {
+          "type": "string"
+        },
+        "engine_repository": {
+          "type": "string"
+        },
+        "engine_revision": {
+          "type": "string"
+        },
+        "installable": {
+          "type": "string"
+        },
+        "nixpkgs_revision": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "system": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "engine_repository",
+        "engine_revision",
+        "nixpkgs_revision",
+        "system",
+        "installable",
+        "version",
+        "derivation",
+        "output"
       ],
       "type": "object"
     },
@@ -217,6 +323,16 @@
         },
         "closure_export": {
           "$ref": "#/$defs/Outcome"
+        },
+        "compiler_cache_cleanup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Outcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "effective": {
           "$ref": "#/$defs/EffectivePlan"
@@ -341,6 +457,38 @@
       ],
       "type": "object"
     },
+    "ReadyReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "invocation": {
+          "$ref": "#/$defs/UnitIdentity"
+        },
+        "service": {
+          "$ref": "#/$defs/ServicePlan"
+        },
+        "socket_device": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "socket_inode": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "supervisor": {
+          "$ref": "#/$defs/UnitIdentity"
+        }
+      },
+      "required": [
+        "service",
+        "invocation",
+        "supervisor",
+        "socket_device",
+        "socket_inode"
+      ],
+      "type": "object"
+    },
     "Recipe": {
       "additionalProperties": false,
       "properties": {
@@ -384,6 +532,17 @@
           },
           "type": "array"
         },
+        "compiler_cache": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompilerCache"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Explicit compiler-cache admission; absent legacy requests keep their digest."
+        },
         "directory": {
           "default": ".",
           "type": "string"
@@ -403,6 +562,13 @@
         "mode": {
           "$ref": "#/$defs/Mode",
           "default": "head"
+        },
+        "nixpkgs_broken_warnings": {
+          "description": "Package-scoped Nixpkgs broken warnings; omitted for legacy request identity.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "packages": {
           "default": [],
@@ -474,6 +640,96 @@
       ],
       "type": "object"
     },
+    "ServicePlan": {
+      "additionalProperties": false,
+      "properties": {
+        "bootstrap": {
+          "$ref": "#/$defs/BootstrapReceipt"
+        },
+        "config": {
+          "type": "string"
+        },
+        "control_directory": {
+          "type": "string"
+        },
+        "cpu_quota_percent": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "$ref": "#/$defs/WorkerIdentity"
+        },
+        "lifetime_seconds": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_db_gib": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memory_max_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_identity": {
+          "type": "string"
+        },
+        "sandbox_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shutdown_seconds": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "socket": {
+          "type": "string"
+        },
+        "startup_seconds": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state_directory": {
+          "type": "string"
+        },
+        "systemd_args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bootstrap",
+        "identity",
+        "run_identity",
+        "unit",
+        "state_directory",
+        "control_directory",
+        "socket",
+        "sandbox_paths",
+        "startup_seconds",
+        "shutdown_seconds",
+        "lifetime_seconds",
+        "memory_max_bytes",
+        "cpu_quota_percent",
+        "max_db_gib",
+        "config",
+        "systemd_args"
+      ],
+      "type": "object"
+    },
     "Target": {
       "additionalProperties": false,
       "properties": {
@@ -498,6 +754,56 @@
         "derivation",
         "outputs",
         "check"
+      ],
+      "type": "object"
+    },
+    "UnitIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "control_group": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "invocation_id",
+        "pid",
+        "control_group"
+      ],
+      "type": "object"
+    },
+    "WorkerIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "gid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "group": {
+          "type": "string"
+        },
+        "uid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "user",
+        "uid",
+        "group",
+        "gid"
       ],
       "type": "object"
     }
