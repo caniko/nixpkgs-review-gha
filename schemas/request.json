@@ -161,6 +161,11 @@
       "minimum": 0,
       "type": "integer"
     },
+    "skip_discovery": {
+      "default": false,
+      "description": "Nixpkgs only: build exactly `packages` and `checks`, skipping changed-package discovery; omitted when false so legacy request identity is unchanged.",
+      "type": "boolean"
+    },
     "systems": {
       "items": {
         "type": "string"
