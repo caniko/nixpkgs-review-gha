@@ -25,17 +25,17 @@
     "simit": {
       "flake": false,
       "locked": {
-        "lastModified": 1793448018,
-        "narHash": "sha256-MzmcrJ9u3ZpX3Q/2m6Ctc0QBjfbB7CKmB/yWZZZukto=",
+        "lastModified": 1793452363,
+        "narHash": "sha256-N1VO+FdXJCWrlW4SJbxsUNTmy7H9GxaiQ+SzTa4XQKk=",
         "owner": "caniko",
         "repo": "simit",
-        "rev": "15c539c93f9a5d4bbdf35a0ce97f674377ae1410",
+        "rev": "3531400f4c788d4e04f64b94b29465e47f72272a",
         "type": "github"
       },
       "original": {
         "owner": "caniko",
         "repo": "simit",
-        "rev": "15c539c93f9a5d4bbdf35a0ce97f674377ae1410",
+        "rev": "3531400f4c788d4e04f64b94b29465e47f72272a",
         "type": "github"
       }
     }
