@@ -14,5 +14,5 @@ runs:
           max-jobs = 2
           cores = 2
           timeout = 18000
-          max-silent-time = 600
+          max-silent-time = 7200
           sandbox = ${{ runner.os == 'macOS' && 'relaxed' || 'true' }}
