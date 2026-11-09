@@ -103,8 +103,10 @@ Runner profile `hosted-v1`: `ubuntu-24.04` → x86_64-linux,
 evaluation. No emulation, personal machines or remote builders. Initial live
 acceptance is x86_64-linux; other platforms have contract coverage, not an
 invented live pass. Darwin uses the explicit `relaxed` sandbox profile; Linux
-requires `true`. IFD and flake nixConfig are disabled, jobs/cores are 2, command
-build timeout 1800s, silent timeout 600s, whole build job 60 minutes.
+requires `true`. IFD and flake nixConfig are disabled, jobs/cores are 2, the
+silent timeout is 7200s, and every build command has an 18000s timeout, for
+flake and `nixpkgs` reviews alike. Preparation spends the same 19800s
+(330-minute) window that bounds every realization inside the 360-minute job.
 
 `checks-v1` accepts realization (including substitution) without claiming fresh
 execution. `checks-rebuild-v1` explicitly rebuilds each selected check; unrelated
