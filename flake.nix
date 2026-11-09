@@ -2,7 +2,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     simit = {
-      url = "github:caniko/simit/e5dfdf18d3170285e4d37a7f41a87a38e89c4b34";
+      url = "github:caniko/simit/42af69e94027c8bf57d2084ec17774ea7171ebb7";
       flake = false;
     };
   };
